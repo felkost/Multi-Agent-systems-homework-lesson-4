@@ -1,0 +1,40 @@
+name: Evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt_version:
+        description: "System prompt version to evaluate"
+        required: true
+        default: "v2"
+        type: choice
+        options: ["v1", "v2"]
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    # GitHub Environment with required reviewers acts as a spend gate:
+    # every run costs real API tokens.
+    environment: evaluation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run LangSmith evaluation
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_TRACING: "true"
+          LANGSMITH_PROJECT: ${{ vars.LANGSMITH_PROJECT }}
+        run: python -m evals.run_eval --prompt-version "${{ inputs.prompt_version }}"

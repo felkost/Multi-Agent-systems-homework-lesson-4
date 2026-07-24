@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Tests must never reach LangSmith. There is no key in CI, and leaving
+  # tracing on would turn a missing key into a confusing hard failure.
+  LANGSMITH_TRACING: "false"
+
+jobs:
+  lint-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: black --check
+        run: black --check .
+
+      - name: flake8
+        run: flake8 .
+
+      - name: mypy
+        run: mypy .
+
+      - name: pytest
+        run: pytest
+
+      - name: pip check
+        run: python -m pip check

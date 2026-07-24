@@ -1,0 +1,23 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.idea/
+.git.hl3.backup/
+
+# Working notes: task statements, plans, eval results stay local
+doc/
+docs/
+
+# Markdown: only the README and generated reports are tracked. Agent-facing
+# docs (CLAUDE.md, AGENTS.md, CONTRIBUTING.md, insights.md, handoff.md,
+# CHANGELOG.md) are intentionally local-only by request - they never leave
+# this machine.
+*.md
+!README.md
+!output/*.md
+!example_output/*.md
+!.github/**/*.md
