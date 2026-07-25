@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     http_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     max_download_bytes: int = Field(default=2_000_000, ge=100_000, le=20_000_000)
     max_iterations: int = Field(default=8, ge=1, le=30)
-
+    max_consecutive_tool_errors: int = Field(default=3, ge=1, le=10)
     output_dir: str = "output"
 
     model_config = SettingsConfigDict(
@@ -90,8 +90,10 @@ actually cited in the report.
 14. Never output placeholder, example, or invented URLs.
 15. Create a structured Markdown report based on the
 collected evidence.
-16. Reserve one tool call for write_report. Stop additional
-searches before the tool-call limit is exhausted.
+16. You have at most {max_iterations} tool-call turns in total
+for this question. Track how many you have used and reserve
+the last one for write_report; stop searching before the
+budget runs out.
 17. After preparing the Markdown report, always call
 write_report to save it.
 18. Do not claim that the report was saved unless
@@ -104,3 +106,15 @@ Do not reveal private chain-of-thought and do not produce
 Thought: sections. Use tools directly and provide only the
 final answer and observable tool activity.
 """
+
+# Sent only as the last message of the final request, never appended to
+# self._messages: a reminder that belongs to one turn's budget, not to the
+# conversation the next question will also see.
+BUDGET_NUDGE_MESSAGE: dict[str, str] = {
+    "role": "system",
+    "content": (
+        "This is the last iteration of your tool-call budget. Call "
+        "write_report now with the best report you can produce from the "
+        "evidence already gathered."
+    ),
+}

@@ -12,7 +12,7 @@ import pytest
 
 import tools
 from agent import ResearchAgent, RunState, react_step
-from config import Settings
+from config import BUDGET_NUDGE_MESSAGE, Settings
 
 from fakes import ScriptedChatClient, ScriptedTurn
 
@@ -68,6 +68,36 @@ def test_single_tool_exchange_extends_history(
     assert [step.name for step in result.steps] == ["web_search"]
 
 
+def test_parallel_tool_calls_all_executed(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_search(monkeypatch)
+    agent, client = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ("web_search", {"query": "angle a"}),
+                    ("web_search", {"query": "angle b"}),
+                    ("web_search", {"query": "angle c"}),
+                ]
+            ),
+            ScriptedTurn(content="Done."),
+        ],
+    )
+
+    result = agent.run("Research three angles at once.")
+
+    assert result.iterations_used == 2
+    assert [step.name for step in result.steps] == ["web_search"] * 3
+
+    tool_messages = [message for message in agent.messages if message["role"] == "tool"]
+    assert len(tool_messages) == 3
+    assert len({message["tool_call_id"] for message in tool_messages}) == 3
+    assert client.requests[0]["parallel_tool_calls"] is True
+    
+    
 def test_system_prompt_is_first_message(configured_settings: Settings) -> None:
     agent, _ = _agent(configured_settings, [ScriptedTurn(content="Answer.")])
 
@@ -199,6 +229,91 @@ def test_non_function_tool_call_is_rejected(configured_settings: Settings) -> No
     assert result.final_answer == "Recovered."
 
 
+def test_malformed_json_arguments_returns_error(configured_settings: Settings) -> None:
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", "not valid json")]),
+            ScriptedTurn(content="Recovered."),
+        ],
+    )
+
+    result = agent.run("Search for something.")
+
+    assert result.steps[0].ok is False
+    assert result.steps[0].result == "ERROR: Tool arguments are not valid JSON."
+    assert result.final_answer == "Recovered."
+
+
+def test_non_object_arguments_returns_error(configured_settings: Settings) -> None:
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", "[1, 2, 3]")]),
+            ScriptedTurn(content="Recovered."),
+        ],
+    )
+
+    result = agent.run("Search for something.")
+
+    assert result.steps[0].ok is False
+    assert result.steps[0].result == "ERROR: Tool arguments must be a JSON object."
+    assert result.final_answer == "Recovered."
+
+
+def test_unknown_tool_returns_error_and_continues(
+    configured_settings: Settings,
+) -> None:
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("delete_everything", {})]),
+            ScriptedTurn(content="Recovered."),
+        ],
+    )
+
+    result = agent.run("Do something unsupported.")
+
+    assert result.steps[0].ok is False
+    assert result.steps[0].result == "ERROR: Unknown tool 'delete_everything'."
+    assert result.final_answer == "Recovered."
+
+
+def test_missing_required_argument_returns_error(
+    configured_settings: Settings,
+) -> None:
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", {})]),
+            ScriptedTurn(content="Recovered."),
+        ],
+    )
+
+    result = agent.run("Search for something.")
+
+    assert result.steps[0].ok is False
+    assert result.steps[0].result == "ERROR: Invalid arguments for 'web_search'."
+    assert result.final_answer == "Recovered."
+
+
+def test_consecutive_tool_errors_stop_loop(configured_settings: Settings) -> None:
+    agent, client = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("no_such_tool", {})]),
+            ScriptedTurn(tool_calls=[("no_such_tool", {})]),
+            ScriptedTurn(tool_calls=[("no_such_tool", {})]),
+        ],
+    )
+
+    result = agent.run("Do something impossible.")
+
+    assert len(client.requests) == 3
+    assert result.stop_reason == "tool_failures"
+    assert result.budget_exhausted is False
+    assert all(not step.ok for step in result.steps)
+
 def test_refusal_stops_the_turn(configured_settings: Settings) -> None:
     agent, _ = _agent(
         configured_settings,
@@ -222,6 +337,26 @@ def test_truncated_response_stops_cleanly(configured_settings: Settings) -> None
     assert result.stop_reason == "truncated"
     assert result.final_answer == "Half an ans"
 
+def test_iteration_limit_stops_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_search(monkeypatch)
+    # One scripted turn per allowed iteration, every one still asking for a
+    # tool: if the loop ever asked for one call too many, the fake client's
+    # "script exhausted" assertion would fail this test for us.
+    script = [
+        ScriptedTurn(tool_calls=[("web_search", {"query": f"q{i}"})])
+        for i in range(configured_settings.max_iterations)
+    ]
+    agent, client = _agent(configured_settings, script)
+
+    result = agent.run("Keep searching forever.")
+
+    assert len(client.requests) == configured_settings.max_iterations
+    assert result.iterations_used == configured_settings.max_iterations
+    assert result.stop_reason == "iteration_limit"
+    assert result.budget_exhausted is True
 
 def test_saved_report_path_is_reported(configured_settings: Settings) -> None:
     agent, _ = _agent(
@@ -239,3 +374,64 @@ def test_saved_report_path_is_reported(configured_settings: Settings) -> None:
     assert result.report_source == "tool"
     assert result.saved_report_path is not None
     assert result.saved_report_path.endswith("rag.md")
+
+
+def test_last_iteration_forces_write_report(configured_settings: Settings) -> None:
+    configured_settings.max_iterations = 1
+    client = ScriptedChatClient([ScriptedTurn(content="Best effort report.")])
+    agent = ResearchAgent(configured_settings, client=client)
+
+    agent.run("Research something huge.")
+
+    assert client.requests[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "write_report"},
+    }
+
+
+def test_budget_nudge_not_persisted_in_history(
+    configured_settings: Settings,
+) -> None:
+    configured_settings.max_iterations = 1
+    client = ScriptedChatClient([ScriptedTurn(content="Best effort report.")])
+    agent = ResearchAgent(configured_settings, client=client)
+
+    agent.run("Research something huge.")
+
+    assert client.requests[0]["messages"][-1] == BUDGET_NUDGE_MESSAGE
+    assert all(
+        message.get("content") != BUDGET_NUDGE_MESSAGE["content"]
+        for message in agent.messages
+    )
+
+
+def test_forced_write_report_skipped_when_already_saved(
+    configured_settings: Settings,
+) -> None:
+    configured_settings.max_iterations = 2
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(
+                tool_calls=[("write_report", {"filename": "r", "content": "# R\n"})]
+            ),
+            ScriptedTurn(content="Done."),
+        ]
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+
+    result = agent.run("Research something.")
+
+    assert result.saved_report_path is not None
+    assert client.requests[1]["tool_choice"] == "auto"
+
+
+def test_system_prompt_states_the_iteration_budget(
+    configured_settings: Settings,
+) -> None:
+    configured_settings.max_iterations = 5
+    client = ScriptedChatClient([ScriptedTurn(content="Answer.")])
+
+    agent = ResearchAgent(configured_settings, client=client)
+
+    assert "5 tool-call turns" in agent.messages[0]["content"]
+    

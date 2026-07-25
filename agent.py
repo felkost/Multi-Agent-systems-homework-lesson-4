@@ -16,7 +16,13 @@ from openai.types.chat import (
     ChatCompletionMessageToolCallUnion,
 )
 
-from config import ERROR_PREFIX, REPORT_SAVED_PREFIX, SYSTEM_PROMPT, Settings
+from config import (
+    BUDGET_NUDGE_MESSAGE,
+    ERROR_PREFIX,
+    REPORT_SAVED_PREFIX,
+    SYSTEM_PROMPT,
+    Settings,
+)
 from tools import TOOL_REGISTRY, TOOL_SCHEMAS
 
 Messages = list[dict[str, Any]]
@@ -53,6 +59,7 @@ class CompletionsProtocol(Protocol):
         tools: Any,
         tool_choice: Any,
         temperature: Any,
+        parallel_tool_calls: Any,        
     ) -> ChatCompletion: ...
 
 
@@ -82,6 +89,7 @@ class RunState:
 
     tool_calls_made: int = 0
     successful_reads: int = 0
+    consecutive_tool_errors: int = 0
     last_report_markdown: str | None = None
     last_report_filename: str | None = None
     saved_report_path: str | None = None
@@ -153,6 +161,19 @@ def _assistant_message_to_dict(message: ChatCompletionMessage) -> dict[str, Any]
     return payload
 
 
+def _record_failure(
+    state: RunState, name: str, arguments: dict[str, Any], message: str
+) -> ToolStep:
+    """Build an ERROR step and count it toward consecutive tool failures."""
+    state.consecutive_tool_errors += 1
+    return ToolStep(
+        name=name,
+        arguments=arguments,
+        result=f"{ERROR_PREFIX}{message}",
+        ok=False,
+    )
+
+
 def _execute_tool_call(
     tool_call: ChatCompletionMessageToolCallUnion,
     state: RunState,
@@ -171,27 +192,45 @@ def _execute_tool_call(
     ToolStep
         Executed step, whose ``result`` is the string handed back to the
         model.
+
+    Notes
+    -----
+    Every failure here is returned as a step, never raised: a broken tool
+    call is data the model can act on and recover from, not a reason to
+    crash the loop.
     """
+    state.tool_calls_made += 1
+
     if tool_call.type != "function":
-        return ToolStep(
-            name=tool_call.type,
-            arguments={},
-            result=f"{ERROR_PREFIX}Only function tool calls are supported.",
-            ok=False,
+        return _record_failure(
+            state, tool_call.type, {}, "Only function tool calls are supported."
         )
 
     name = tool_call.function.name
-    arguments = json.loads(tool_call.function.arguments)
-    function = TOOL_REGISTRY[name]
+    try:
+        arguments = json.loads(tool_call.function.arguments)
+    except json.JSONDecodeError:
+        return _record_failure(state, name, {}, "Tool arguments are not valid JSON.")
+    if not isinstance(arguments, dict):
+        return _record_failure(state, name, {}, "Tool arguments must be a JSON object.")
 
-    state.tool_calls_made += 1
+    function = TOOL_REGISTRY.get(name)
+    if function is None:
+        return _record_failure(state, name, arguments, f"Unknown tool '{name}'.")
+
     if name == "write_report":
         # Recorded before the call: when saving fails, the completion gate
         # still has the markdown the model produced.
         state.last_report_markdown = arguments.get("content")
         state.last_report_filename = arguments.get("filename")
 
-    result = function(**arguments)
+    try:
+        result = function(**arguments)
+    except TypeError:
+        return _record_failure(
+            state, name, arguments, f"Invalid arguments for '{name}'."
+        )
+
     # A tool result reaches the model as text, so anything that is not already
     # a string is serialized here. ensure_ascii=False keeps Cyrillic readable
     # and roughly three times cheaper in tokens than its escaped form.
@@ -199,6 +238,7 @@ def _execute_tool_call(
         result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
     )
     ok = not content.startswith(ERROR_PREFIX)
+    state.consecutive_tool_errors = 0 if ok else state.consecutive_tool_errors + 1
 
     if name == "read_url" and ok:
         state.successful_reads += 1
@@ -213,6 +253,8 @@ def react_step(
     client: LLMClient,
     settings: Settings,
     state: RunState,
+    *,
+    force_write_report: bool = False,
 ) -> StepResult:
     """Call the model once and run whatever tools it asked for.
 
@@ -227,6 +269,10 @@ def react_step(
         Model name and temperature for the request.
     state : RunState
         Updated in place by the tool calls of this step.
+    force_write_report : bool, optional
+        Requested by the caller on the last iteration. Only takes effect when
+        no report has been saved yet: forcing it again after a successful
+        save would loop the model into writing forever.
 
     Returns
     -------
@@ -240,13 +286,25 @@ def react_step(
     request in which a ``tool_call_id`` has no assistant message announcing
     it, so this ordering is part of the protocol, not bookkeeping.
     """
+    force = force_write_report and state.saved_report_path is None
+    # The nudge is a request-only addition: request_messages carries it to
+    # the API, but `updated` (the persisted history) is built from the
+    # original `messages` a few lines down, so the next question never sees
+    # it.
+    request_messages = [*messages, BUDGET_NUDGE_MESSAGE] if force else messages
+    tool_choice: str | dict[str, Any] = (
+        {"type": "function", "function": {"name": "write_report"}} if force else "auto"
+    )
+
     response = client.chat.completions.create(
         model=settings.model_name,
-        messages=messages,
+        messages=request_messages,
         tools=TOOL_SCHEMAS,
-        tool_choice="auto",
+        tool_choice=tool_choice,
         temperature=settings.temperature,
+        parallel_tool_calls=True,
     )
+
     choice = response.choices[0]
     message = choice.message
     updated: Messages = [*messages, _assistant_message_to_dict(message)]
@@ -272,6 +330,10 @@ def react_step(
                 "content": step.result,
             }
         )
+    if state.consecutive_tool_errors >= settings.max_consecutive_tool_errors:
+        # [12-factor #9]: an unreachable backend would otherwise burn the
+        # whole iteration budget on calls that were never going to succeed.
+        return StepResult(updated, steps, None, "tool_failures")
     return StepResult(updated, steps, None, None)
 
 
@@ -297,7 +359,8 @@ class ResearchAgent:
         if client is None:
             client = OpenAI(api_key=settings.api_key.get_secret_value())
         self._client = client
-        self._messages: Messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        system_prompt = SYSTEM_PROMPT.format(max_iterations=settings.max_iterations)
+        self._messages: Messages = [{"role": "system", "content": system_prompt}]
 
     @property
     def messages(self) -> Messages:
@@ -320,20 +383,34 @@ class ResearchAgent:
         state = RunState()
         steps: list[ToolStep] = []
         pending: Messages = [*self._messages, {"role": "user", "content": user_input}]
+        max_iterations = self._settings.max_iterations
 
-        step = react_step(pending, self._client, self._settings, state)
+        step = react_step(
+            pending,
+            self._client,
+            self._settings,
+            state,
+            force_write_report=max_iterations == 1,
+        )
         steps.extend(step.steps)
-        iterations_used = 1
-        if step.stop_reason is None:
-            step = react_step(step.messages, self._client, self._settings, state)
-            steps.extend(step.steps)
-            iterations_used = 2
+        iteration = 1
 
+        while step.stop_reason is None and iteration < max_iterations:
+            iteration += 1
+            step = react_step(
+                step.messages,
+                self._client,
+                self._settings,
+                state,
+                force_write_report=iteration == max_iterations,
+            )
+            steps.extend(step.steps)
+            
         # Assigned once, after the turn survived. An exception mid-turn would
         # otherwise leave a tool_call_id without its tool result, and every
         # later request would fail with HTTP 400.
         self._messages = step.messages
-        return self._finish(step, steps, state, iterations_used)
+        return self._finish(step, steps, state, iteration)
 
     def _finish(
         self,
@@ -353,3 +430,4 @@ class ResearchAgent:
             saved_report_path=state.saved_report_path,
             report_source="tool" if state.saved_report_path is not None else "none",
         )
+        
