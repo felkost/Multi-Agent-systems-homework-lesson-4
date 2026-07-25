@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     max_search_snippet_length: int = Field(default=500, ge=100, le=2000)
     max_url_content_length: int = Field(default=5000, ge=1000, le=10000)
     http_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
+    http_retries: int = Field(default=1, ge=0, le=5)
     max_download_bytes: int = Field(default=2_000_000, ge=100_000, le=20_000_000)
     max_iterations: int = Field(default=8, ge=1, le=30)
     max_consecutive_tool_errors: int = Field(default=3, ge=1, le=10)

@@ -59,7 +59,7 @@ class CompletionsProtocol(Protocol):
         tools: Any,
         tool_choice: Any,
         temperature: Any,
-        parallel_tool_calls: Any,        
+        parallel_tool_calls: Any,
     ) -> ChatCompletion: ...
 
 
@@ -405,7 +405,7 @@ class ResearchAgent:
                 force_write_report=iteration == max_iterations,
             )
             steps.extend(step.steps)
-            
+
         # Assigned once, after the turn survived. An exception mid-turn would
         # otherwise leave a tool_call_id without its tool result, and every
         # later request would fail with HTTP 400.
@@ -430,4 +430,3 @@ class ResearchAgent:
             saved_report_path=state.saved_report_path,
             report_source="tool" if state.saved_report_path is not None else "none",
         )
-        

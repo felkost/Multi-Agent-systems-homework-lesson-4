@@ -255,6 +255,91 @@ def test_read_url_handles_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stream.bytes_yielded == 0
 
 
+def test_read_url_does_not_retry_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    configured_settings.http_retries = 2
+    sleep_mock = Mock()
+    monkeypatch.setattr(tools.time, "sleep", sleep_mock)
+    stream = FakeStream(
+        [b"<html>not found</html>"],
+        status_error=httpx.HTTPStatusError(
+            "404",
+            request=Mock(),
+            response=Mock(status_code=404),
+        ),
+    )
+    stream_mock = _patch_stream(monkeypatch, stream)
+
+    call_tool("read_url", url="https://example.com/missing")
+
+    stream_mock.assert_called_once()
+    sleep_mock.assert_not_called()
+
+
+def test_read_url_retries_transient_error_once(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    configured_settings.http_retries = 1
+    sleep_mock = Mock()
+    monkeypatch.setattr(tools.time, "sleep", sleep_mock)
+    good_stream = FakeStream([b"<html>recovered</html>"])
+    stream_mock = Mock(side_effect=[httpx.TimeoutException("timed out"), good_stream])
+    monkeypatch.setattr(tools.httpx, "stream", stream_mock)
+    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Recovered"))
+
+    result = call_tool("read_url", url="https://example.com")
+
+    assert stream_mock.call_count == 2
+    assert sleep_mock.call_count == 1
+    assert result == "Recovered"
+
+
+def test_read_url_retries_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    configured_settings.http_retries = 1
+    monkeypatch.setattr(tools.time, "sleep", Mock())
+    bad_stream = FakeStream(
+        [b""],
+        status_error=httpx.HTTPStatusError(
+            "503",
+            request=Mock(),
+            response=Mock(status_code=503),
+        ),
+    )
+    good_stream = FakeStream([b"<html>recovered</html>"])
+    monkeypatch.setattr(
+        tools.httpx, "stream", Mock(side_effect=[bad_stream, good_stream])
+    )
+    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Recovered"))
+
+    result = call_tool("read_url", url="https://example.com")
+
+    assert result == "Recovered"
+
+
+def test_read_url_gives_up_after_retry_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    configured_settings.http_retries = 1
+    monkeypatch.setattr(tools.time, "sleep", Mock())
+    stream_mock = Mock(side_effect=httpx.TimeoutException("timed out"))
+    monkeypatch.setattr(tools.httpx, "stream", stream_mock)
+
+    result = call_tool("read_url", url="https://example.com")
+
+    assert stream_mock.call_count == 2
+    assert (
+        result == "ERROR: The page request timed out. Try a different source "
+        "from your search results."
+    )
+
+
 def test_read_url_handles_empty_extract(monkeypatch: pytest.MonkeyPatch) -> None:
     body = b"<html><body></body></html>"
     stream_mock = _patch_stream(monkeypatch, FakeStream([body]))

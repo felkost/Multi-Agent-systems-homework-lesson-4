@@ -96,8 +96,8 @@ def test_parallel_tool_calls_all_executed(
     assert len(tool_messages) == 3
     assert len({message["tool_call_id"] for message in tool_messages}) == 3
     assert client.requests[0]["parallel_tool_calls"] is True
-    
-    
+
+
 def test_system_prompt_is_first_message(configured_settings: Settings) -> None:
     agent, _ = _agent(configured_settings, [ScriptedTurn(content="Answer.")])
 
@@ -314,6 +314,7 @@ def test_consecutive_tool_errors_stop_loop(configured_settings: Settings) -> Non
     assert result.budget_exhausted is False
     assert all(not step.ok for step in result.steps)
 
+
 def test_refusal_stops_the_turn(configured_settings: Settings) -> None:
     agent, _ = _agent(
         configured_settings,
@@ -337,6 +338,7 @@ def test_truncated_response_stops_cleanly(configured_settings: Settings) -> None
     assert result.stop_reason == "truncated"
     assert result.final_answer == "Half an ans"
 
+
 def test_iteration_limit_stops_loop(
     monkeypatch: pytest.MonkeyPatch,
     configured_settings: Settings,
@@ -357,6 +359,7 @@ def test_iteration_limit_stops_loop(
     assert result.iterations_used == configured_settings.max_iterations
     assert result.stop_reason == "iteration_limit"
     assert result.budget_exhausted is True
+
 
 def test_saved_report_path_is_reported(configured_settings: Settings) -> None:
     agent, _ = _agent(
@@ -434,4 +437,3 @@ def test_system_prompt_states_the_iteration_budget(
     agent = ResearchAgent(configured_settings, client=client)
 
     assert "5 tool-call turns" in agent.messages[0]["content"]
-    
