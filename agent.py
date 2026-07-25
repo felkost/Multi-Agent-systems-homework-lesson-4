@@ -1,31 +1,34 @@
-from langchain.agents import create_agent  # створює single-agent ReAct loop
-from langchain.agents.middleware import (
-    ToolCallLimitMiddleware,
-)  # обмежує tool calls одного запуску
-from langchain_core.language_models import (
-    BaseChatModel,
-)  # спільний тип реальної та fake-моделі
-from langchain_openai import ChatOpenAI  # модель за замовчуванням
-from langgraph.checkpoint.memory import InMemorySaver  # пам’ять розмови
-from langgraph.graph.state import CompiledStateGraph  # тип результату фабрики
+from langchain.agents import create_agent
+from langchain.agents.middleware import ToolCallLimitMiddleware
+from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph.state import CompiledStateGraph
 
-from config import SYSTEM_PROMPT, Settings  # стратегія дослідження, готова конфігурація
-from tools import read_url, web_search, write_report  # три tools
+from config import SYSTEM_PROMPT, Settings
+from tools import TOOL_REGISTRY
 
 
-# create_agent повертає скомпільований граф,
-# який викликає модель і tools у циклі до завершення
-# Bідповідальності розділенi:
-# config.py читає й перевіряє конфігурацію;
-# agent.py створює агента;
-# main.py керує запуском.
-# Є два режими: create_research_agent(settings) cтворює справжній ChatOpenAI
-# другий - використовує передану модель без створення ChatOpenAI
-# create_research_agent(settings, model=fake_model)
 def create_research_agent(
     settings: Settings, model: BaseChatModel | None = None
 ) -> CompiledStateGraph:
-    """Create the configured research agent graph."""
+    """Create the configured research agent graph.
+
+    Parameters
+    ----------
+    settings : Settings
+        Model name, temperature and tool-call budget for the run.
+    model : BaseChatModel, optional
+        Chat model to use instead of building a `ChatOpenAI` from `settings`.
+        Tests pass a scripted model here, which is what lets the suite run
+        without an API key.
+
+    Returns
+    -------
+    CompiledStateGraph
+        Graph that alternates model calls and tool calls until the model
+        answers without requesting another tool.
+    """
     research_model: BaseChatModel
     if model is None:
         research_model = ChatOpenAI(
@@ -35,11 +38,7 @@ def create_research_agent(
         )
     else:
         research_model = model
-    tools = [
-        web_search,
-        read_url,
-        write_report,
-    ]
+    tools = list(TOOL_REGISTRY.values())
     checkpointer = InMemorySaver()
     middleware = [
         ToolCallLimitMiddleware(

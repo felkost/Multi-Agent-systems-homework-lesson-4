@@ -3,6 +3,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Runtime configuration, read from the environment and then ``.env``.
+
+    Field names map to upper-case environment variables. The bounds on the
+    numeric fields are enforced by pydantic, so an out-of-range value fails
+    at startup instead of halfway through a research run.
+    """
+
     api_key: SecretStr = Field(validation_alias="OPENAI_API_KEY")
     model_name: str = Field(default="gpt-4o-mini", validation_alias="MODEL_NAME")
 
@@ -12,7 +19,7 @@ class Settings(BaseSettings):
     max_search_snippet_length: int = Field(default=500, ge=100, le=2000)
     max_url_content_length: int = Field(default=5000, ge=1000, le=10000)
     http_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
-    max_tool_calls: int = Field(default=10, ge=1, le=50)  # max_iterations
+    max_tool_calls: int = Field(default=10, ge=1, le=50)
     recursion_limit: int = Field(default=100, ge=2, le=200)
 
     output_dir: str = "output"
@@ -25,7 +32,22 @@ class Settings(BaseSettings):
 
 
 def load_settings() -> Settings:
-    return Settings()  # type: ignore[call-arg]
+    """Build `Settings` from the environment and ``.env``.
+
+    Returns
+    -------
+    Settings
+        Validated configuration.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If ``OPENAI_API_KEY`` is missing or a field is out of range.
+    """
+    # model_validate({}) rather than Settings(): the settings sources still
+    # read the environment and .env, but mypy no longer demands api_key as a
+    # constructor argument.
+    return Settings.model_validate({})
 
 
 SYSTEM_PROMPT = """
