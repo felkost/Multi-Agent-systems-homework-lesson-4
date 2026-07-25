@@ -48,6 +48,7 @@ def configured_settings(
     monkeypatch.setenv("MAX_SEARCH_SNIPPET_LENGTH", "100")
     monkeypatch.setenv("MAX_URL_CONTENT_LENGTH", "1000")
     monkeypatch.setenv("HTTP_TIMEOUT_SECONDS", "2")
+    monkeypatch.setenv("MAX_DOWNLOAD_BYTES", "100000")
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "output"))
 
     return Settings.model_validate({})
