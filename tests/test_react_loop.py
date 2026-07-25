@@ -21,7 +21,7 @@ pytestmark = pytest.mark.usefixtures("patch_tool_settings")
 
 def _patch_search(
     monkeypatch: pytest.MonkeyPatch, *, snippet: str = "A snippet"
-) -> None:
+) -> Mock:
     search_client = Mock()
     search_client.text.return_value = [
         {
@@ -31,6 +31,7 @@ def _patch_search(
         }
     ]
     monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
+    return search_client
 
 
 def _agent(
@@ -437,3 +438,68 @@ def test_system_prompt_states_the_iteration_budget(
     agent = ResearchAgent(configured_settings, client=client)
 
     assert "5 tool-call turns" in agent.messages[0]["content"]
+
+
+def test_repeated_web_search_query_is_cached_within_a_run(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    search_client = _patch_search(monkeypatch)
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(content="Done."),
+        ],
+    )
+
+    result = agent.run("What is RAG?")
+
+    search_client.text.assert_called_once()
+    tool_messages = [message for message in agent.messages if message["role"] == "tool"]
+    assert tool_messages[0]["content"] == tool_messages[1]["content"]
+    assert [step.ok for step in result.steps] == [True, True]
+
+
+def test_search_cache_does_not_survive_across_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    search_client = _patch_search(monkeypatch)
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(content="First answer."),
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(content="Second answer."),
+        ],
+    )
+
+    agent.run("What is RAG?")
+    agent.run("What is RAG, again?")
+
+    assert search_client.text.call_count == 2
+
+
+def test_failed_web_search_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    search_client = Mock()
+    search_client.text.side_effect = RuntimeError("backend down")
+    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(content="Done."),
+        ],
+    )
+
+    result = agent.run("What is RAG?")
+
+    assert search_client.text.call_count == 2
+    assert [step.ok for step in result.steps] == [False, False]

@@ -6,7 +6,7 @@ checkpointer, no graph, no framework state.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from openai import OpenAI
@@ -90,6 +90,10 @@ class RunState:
     tool_calls_made: int = 0
     successful_reads: int = 0
     consecutive_tool_errors: int = 0
+    # Keyed on the raw query string. Lives only as long as this RunState (one
+    # run()); a repeat of the same phrase in a later question is not a cache
+    # hit, since the web has had a chance to change by then.
+    search_cache: dict[str, str] = field(default_factory=dict)
     last_report_markdown: str | None = None
     last_report_filename: str | None = None
     saved_report_path: str | None = None
@@ -198,6 +202,10 @@ def _execute_tool_call(
     Every failure here is returned as a step, never raised: a broken tool
     call is data the model can act on and recover from, not a reason to
     crash the loop.
+
+    A repeated `web_search` query is served from `state.search_cache` instead
+    of hitting the backend again; only a successful search is ever cached, so
+    a transient failure still gets a genuine retry.
     """
     state.tool_calls_made += 1
 
@@ -217,6 +225,17 @@ def _execute_tool_call(
     function = TOOL_REGISTRY.get(name)
     if function is None:
         return _record_failure(state, name, arguments, f"Unknown tool '{name}'.")
+
+    if name == "web_search":
+        query = arguments.get("query")
+        if isinstance(query, str) and query in state.search_cache:
+            state.consecutive_tool_errors = 0
+            return ToolStep(
+                name=name,
+                arguments=arguments,
+                result=state.search_cache[query],
+                ok=True,
+            )
 
     if name == "write_report":
         # Recorded before the call: when saving fails, the completion gate
@@ -240,6 +259,8 @@ def _execute_tool_call(
     ok = not content.startswith(ERROR_PREFIX)
     state.consecutive_tool_errors = 0 if ok else state.consecutive_tool_errors + 1
 
+    if name == "web_search" and ok and isinstance(arguments.get("query"), str):
+        state.search_cache[arguments["query"]] = content
     if name == "read_url" and ok:
         state.successful_reads += 1
     if name == "write_report" and content.startswith(REPORT_SAVED_PREFIX):
