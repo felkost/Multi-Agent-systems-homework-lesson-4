@@ -20,8 +20,7 @@ class Settings(BaseSettings):
     max_url_content_length: int = Field(default=5000, ge=1000, le=10000)
     http_timeout_seconds: float = Field(default=10.0, ge=1.0, le=60.0)
     max_download_bytes: int = Field(default=2_000_000, ge=100_000, le=20_000_000)
-    max_tool_calls: int = Field(default=10, ge=1, le=50)
-    recursion_limit: int = Field(default=100, ge=2, le=200)
+    max_iterations: int = Field(default=8, ge=1, le=30)
 
     output_dir: str = "output"
 
@@ -49,6 +48,13 @@ def load_settings() -> Settings:
     # read the environment and .env, but mypy no longer demands api_key as a
     # constructor argument.
     return Settings.model_validate({})
+
+
+# The two prefixes that make a tool result machine-readable. The loop decides
+# whether a step succeeded and whether a report exists by matching them, so
+# they cannot be spelled out a second time at the call sites.
+ERROR_PREFIX = "ERROR: "
+REPORT_SAVED_PREFIX = "Report saved to: "
 
 
 SYSTEM_PROMPT = """

@@ -19,7 +19,7 @@ import httpx
 import trafilatura
 from ddgs import DDGS
 
-from config import load_settings
+from config import REPORT_SAVED_PREFIX, load_settings
 
 SearchResult = TypedDict(
     "SearchResult",
@@ -296,7 +296,7 @@ def write_report(filename: str, content: str) -> str:
             return "ERROR: Report path is outside the output directory."
 
         report_path.write_text(content, encoding="utf-8")
-        return f"Report saved to: {report_path}"
+        return f"{REPORT_SAVED_PREFIX}{report_path}"
     except Exception:
         return "ERROR: Report could not be saved."
 
