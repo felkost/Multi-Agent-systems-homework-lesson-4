@@ -57,7 +57,10 @@ def web_search(query: str) -> list[SearchResult] | str:
     """
     normalized_query = query.strip()
     if not normalized_query:
-        return "ERROR: Search query cannot be empty."
+        return (
+            "ERROR: Search query cannot be empty. Provide a specific "
+            "question or phrase."
+        )
 
     try:
         settings = load_settings()
@@ -198,7 +201,10 @@ def read_url(url: str) -> str:
 
         extracted_text = trafilatura.extract(html)
         if not extracted_text:
-            return "ERROR: No readable text was found on the page."
+            return (
+                "ERROR: No readable text was found (the page may be "
+                "JS-only or a PDF). Try another source."
+            )
         text = extracted_text.strip()
         if len(text) <= settings.max_url_content_length:
             return text
@@ -209,9 +215,15 @@ def read_url(url: str) -> str:
             f"{settings.max_url_content_length} characters.]"
         )
     except httpx.TimeoutException:
-        return "ERROR: The page request timed out."
+        return (
+            "ERROR: The page request timed out. Try a different source "
+            "from your search results."
+        )
     except httpx.HTTPError:
-        return "ERROR: The page is unavailable."
+        return (
+            "ERROR: The page is unavailable. Pick another URL from your "
+            "search results."
+        )
     except Exception:
         return "ERROR: The page could not be read."
 
@@ -272,7 +284,10 @@ def write_report(filename: str, content: str) -> str:
     ``../escape.md`` is reduced to ``escape.md`` rather than rejected.
     """
     if not content.strip():
-        return "ERROR: Report content cannot be empty."
+        return (
+            "ERROR: Report content cannot be empty. Write the Markdown "
+            "report first, then save it."
+        )
     normalized_name = filename.strip().replace("\\", "/")
     base_name = normalized_name.rsplit("/", maxsplit=1)[-1]
     stem = Path(base_name).stem

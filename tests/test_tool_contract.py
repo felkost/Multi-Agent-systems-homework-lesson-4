@@ -30,7 +30,10 @@ pytestmark = pytest.mark.usefixtures("patch_tool_settings")
 def test_web_search_rejects_empty_query() -> None:
     result = call_tool("web_search", query="   ")
 
-    assert result == "ERROR: Search query cannot be empty."
+    assert (
+        result
+        == "ERROR: Search query cannot be empty. Provide a specific question or phrase."
+    )
 
 
 def test_web_search_normalizes_and_removes_duplicates(
@@ -226,7 +229,10 @@ def test_read_url_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = call_tool("read_url", url="https://example.com")
 
-    assert result == "ERROR: The page request timed out."
+    assert (
+        result == "ERROR: The page request timed out. Try a different source "
+        "from your search results."
+    )
 
 
 def test_read_url_handles_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,7 +248,10 @@ def test_read_url_handles_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = call_tool("read_url", url="https://example.com/missing")
 
-    assert result == "ERROR: The page is unavailable."
+    assert (
+        result == "ERROR: The page is unavailable. Pick another URL from your "
+        "search results."
+    )
     assert stream.bytes_yielded == 0
 
 
@@ -254,7 +263,10 @@ def test_read_url_handles_empty_extract(monkeypatch: pytest.MonkeyPatch) -> None
 
     result = call_tool("read_url", url="https://example.com")
 
-    assert result == "ERROR: No readable text was found on the page."
+    assert (
+        result == "ERROR: No readable text was found (the page may be "
+        "JS-only or a PDF). Try another source."
+    )
     stream_mock.assert_called_once_with(
         "GET",
         "https://example.com",
@@ -426,7 +438,10 @@ def test_read_url_accepts_uppercase_content_type(
 def test_write_report_rejects_empty_content() -> None:
     result = call_tool("write_report", filename="empty", content="   ")
 
-    assert result == "ERROR: Report content cannot be empty."
+    assert (
+        result == "ERROR: Report content cannot be empty. Write the Markdown "
+        "report first, then save it."
+    )
 
 
 def test_write_report_rejects_filename_with_no_safe_characters() -> None:
