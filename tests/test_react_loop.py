@@ -6,7 +6,7 @@ search backend is patched, while the tools themselves run for real.
 
 import json
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -503,3 +503,34 @@ def test_failed_web_search_is_not_cached(
 
     assert search_client.text.call_count == 2
     assert [step.ok for step in result.steps] == [False, False]
+
+
+def test_successful_read_url_increments_state(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.headers = {"content-type": "text/html; charset=utf-8"}
+    response.iter_bytes.return_value = [b"<html><body><p>Hello</p></body></html>"]
+    response.encoding = "utf-8"
+    stream_context = MagicMock()
+    stream_context.__enter__.return_value = response
+    stream_context.__exit__.return_value = False
+    monkeypatch.setattr(tools.httpx, "stream", Mock(return_value=stream_context))
+    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Hello"))
+
+    client = ScriptedChatClient(
+        [ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})])]
+    )
+    state = RunState()
+
+    result = react_step(
+        [{"role": "user", "content": "Read this page."}],
+        client,
+        configured_settings,
+        state,
+    )
+
+    assert result.steps[0].ok is True
+    assert state.successful_reads == 1
