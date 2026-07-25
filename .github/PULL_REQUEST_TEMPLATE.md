@@ -1,3 +1,4 @@
+<!-- markdownlint-disable-next-line MD041 -->
 ## What this PR does
 
 <!-- May be AI-drafted; disclose in the AI assistance checkbox below. -->
