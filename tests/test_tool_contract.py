@@ -30,7 +30,10 @@ pytestmark = pytest.mark.usefixtures("patch_tool_settings")
 def test_web_search_rejects_empty_query() -> None:
     result = call_tool("web_search", query="   ")
 
-    assert result == "ERROR: Search query cannot be empty."
+    assert (
+        result
+        == "ERROR: Search query cannot be empty. Provide a specific question or phrase."
+    )
 
 
 def test_web_search_normalizes_and_removes_duplicates(
@@ -226,7 +229,10 @@ def test_read_url_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = call_tool("read_url", url="https://example.com")
 
-    assert result == "ERROR: The page request timed out."
+    assert (
+        result == "ERROR: The page request timed out. Try a different source "
+        "from your search results."
+    )
 
 
 def test_read_url_handles_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,8 +248,96 @@ def test_read_url_handles_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     result = call_tool("read_url", url="https://example.com/missing")
 
-    assert result == "ERROR: The page is unavailable."
+    assert (
+        result == "ERROR: The page is unavailable. Pick another URL from your "
+        "search results."
+    )
     assert stream.bytes_yielded == 0
+
+
+def test_read_url_does_not_retry_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    configured_settings.http_retries = 2
+    sleep_mock = Mock()
+    monkeypatch.setattr(tools.time, "sleep", sleep_mock)
+    stream = FakeStream(
+        [b"<html>not found</html>"],
+        status_error=httpx.HTTPStatusError(
+            "404",
+            request=Mock(),
+            response=Mock(status_code=404),
+        ),
+    )
+    stream_mock = _patch_stream(monkeypatch, stream)
+
+    call_tool("read_url", url="https://example.com/missing")
+
+    stream_mock.assert_called_once()
+    sleep_mock.assert_not_called()
+
+
+def test_read_url_retries_transient_error_once(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    configured_settings.http_retries = 1
+    sleep_mock = Mock()
+    monkeypatch.setattr(tools.time, "sleep", sleep_mock)
+    good_stream = FakeStream([b"<html>recovered</html>"])
+    stream_mock = Mock(side_effect=[httpx.TimeoutException("timed out"), good_stream])
+    monkeypatch.setattr(tools.httpx, "stream", stream_mock)
+    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Recovered"))
+
+    result = call_tool("read_url", url="https://example.com")
+
+    assert stream_mock.call_count == 2
+    assert sleep_mock.call_count == 1
+    assert result == "Recovered"
+
+
+def test_read_url_retries_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    configured_settings.http_retries = 1
+    monkeypatch.setattr(tools.time, "sleep", Mock())
+    bad_stream = FakeStream(
+        [b""],
+        status_error=httpx.HTTPStatusError(
+            "503",
+            request=Mock(),
+            response=Mock(status_code=503),
+        ),
+    )
+    good_stream = FakeStream([b"<html>recovered</html>"])
+    monkeypatch.setattr(
+        tools.httpx, "stream", Mock(side_effect=[bad_stream, good_stream])
+    )
+    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Recovered"))
+
+    result = call_tool("read_url", url="https://example.com")
+
+    assert result == "Recovered"
+
+
+def test_read_url_gives_up_after_retry_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    configured_settings.http_retries = 1
+    monkeypatch.setattr(tools.time, "sleep", Mock())
+    stream_mock = Mock(side_effect=httpx.TimeoutException("timed out"))
+    monkeypatch.setattr(tools.httpx, "stream", stream_mock)
+
+    result = call_tool("read_url", url="https://example.com")
+
+    assert stream_mock.call_count == 2
+    assert (
+        result == "ERROR: The page request timed out. Try a different source "
+        "from your search results."
+    )
 
 
 def test_read_url_handles_empty_extract(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,7 +348,10 @@ def test_read_url_handles_empty_extract(monkeypatch: pytest.MonkeyPatch) -> None
 
     result = call_tool("read_url", url="https://example.com")
 
-    assert result == "ERROR: No readable text was found on the page."
+    assert (
+        result == "ERROR: No readable text was found (the page may be "
+        "JS-only or a PDF). Try another source."
+    )
     stream_mock.assert_called_once_with(
         "GET",
         "https://example.com",
@@ -426,7 +523,10 @@ def test_read_url_accepts_uppercase_content_type(
 def test_write_report_rejects_empty_content() -> None:
     result = call_tool("write_report", filename="empty", content="   ")
 
-    assert result == "ERROR: Report content cannot be empty."
+    assert (
+        result == "ERROR: Report content cannot be empty. Write the Markdown "
+        "report first, then save it."
+    )
 
 
 def test_write_report_rejects_filename_with_no_safe_characters() -> None:

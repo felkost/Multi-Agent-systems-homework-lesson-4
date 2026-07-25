@@ -1,124 +1,48 @@
-from collections.abc import Sequence
-from typing import Any, Self
+"""Session memory: one list of dicts on the agent, no checkpointer."""
 
-import pytest
-from langchain_core.callbacks import (
-    CallbackManagerForLLMRun,
-)
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-)
-from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.runnables import RunnableConfig
-
-from agent import create_research_agent
+from agent import ResearchAgent
 from config import Settings
 
+from fakes import ScriptedChatClient, ScriptedTurn
 
-class ContextEchoChatModel(BaseChatModel):
-    @property
-    def _llm_type(self) -> str:
-        return "context-echo-test-model"
 
-    def bind_tools(
-        self,
-        tools: Sequence[Any],
-        **kwargs: Any,
-    ) -> Self:
-        del tools, kwargs
-        return self
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        del stop, run_manager, kwargs
-
-        human_messages = [
-            message.content
-            for message in messages
-            if isinstance(message, HumanMessage) and isinstance(message.content, str)
+def test_second_question_sees_the_first_exchange(
+    configured_settings: Settings,
+) -> None:
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(content="First answer."),
+            ScriptedTurn(content="Second answer."),
         ]
-        response = " | ".join(human_messages)
+    )
+    agent = ResearchAgent(configured_settings, client=client)
 
-        return ChatResult(
-            generations=[
-                ChatGeneration(
-                    message=AIMessage(content=response),
-                )
-            ]
-        )
+    agent.run("First question.")
+    agent.run("Second question.")
 
+    sent = client.requests[1]["messages"]
 
-@pytest.fixture
-def settings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Settings:
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    return Settings.model_validate({})
-
-
-def _thread_config(thread_id: str) -> RunnableConfig:
-    return {
-        "configurable": {
-            "thread_id": thread_id,
-        }
-    }
+    assert [message["role"] for message in sent] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert sent[1]["content"] == "First question."
+    assert sent[2]["content"] == "First answer."
 
 
-def _last_ai_text(result: dict[str, Any]) -> str:
-    message = result["messages"][-1]
-
-    assert isinstance(message, AIMessage)
-    assert isinstance(message.content, str)
-
-    return message.content
-
-
-def test_same_thread_id_preserves_context(
-    settings: Settings,
+def test_separate_agents_do_not_share_history(
+    configured_settings: Settings,
 ) -> None:
-    model = ContextEchoChatModel()
-    agent = create_research_agent(
-        settings,
-        model=model,
-    )
-    config = _thread_config("thread-one")
+    first_client = ScriptedChatClient([ScriptedTurn(content="First answer.")])
+    second_client = ScriptedChatClient([ScriptedTurn(content="Second answer.")])
 
-    agent.invoke(
-        {"messages": [("user", "first message")]},
-        config=config,
-    )
-    result = agent.invoke(
-        {"messages": [("user", "second message")]},
-        config=config,
-    )
+    ResearchAgent(configured_settings, client=first_client).run("First question.")
+    second_agent = ResearchAgent(configured_settings, client=second_client)
+    second_agent.run("Second question.")
 
-    assert _last_ai_text(result) == ("first message | second message")
+    sent = second_client.requests[0]["messages"]
 
-
-def test_different_thread_ids_are_isolated(
-    settings: Settings,
-) -> None:
-    model = ContextEchoChatModel()
-    agent = create_research_agent(
-        settings,
-        model=model,
-    )
-
-    agent.invoke(
-        {"messages": [("user", "thread A message")]},
-        config=_thread_config("thread-a"),
-    )
-    result = agent.invoke(
-        {"messages": [("user", "thread B message")]},
-        config=_thread_config("thread-b"),
-    )
-
-    assert _last_ai_text(result) == "thread B message"
+    assert [message["role"] for message in sent] == ["system", "user"]
+    assert sent[1]["content"] == "Second question."
