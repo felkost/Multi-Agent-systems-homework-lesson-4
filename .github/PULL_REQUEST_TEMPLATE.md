@@ -1,6 +1,6 @@
 ## What this PR does
 
-<!-- One paragraph, written by the author. -->
+<!-- May be AI-drafted; disclose in the AI assistance checkbox below. -->
 
 ## Checklist
 
