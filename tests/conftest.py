@@ -15,14 +15,27 @@ from config import Settings  # noqa: E402
 
 
 def call_tool(name: str, **kwargs: Any) -> Any:
-    """Invoke a tool by name through its current LangChain ``@tool`` wrapper.
+    """Invoke a tool by name the way the ReAct loop does.
 
-    The only place that knows tools are still LangChain ``BaseTool``
-    objects, so stage 2 (plain functions + ``TOOL_REGISTRY``) only needs
-    to change this function, not every test that calls a tool.
+    Dispatching through ``TOOL_REGISTRY`` keeps the characterization tests
+    independent of how tools are wired up: stage 2 replaced LangChain
+    ``BaseTool`` objects with plain functions by editing only this helper.
     """
-    tool_object = getattr(tools, name)
-    return tool_object.invoke(kwargs)
+    return tools.TOOL_REGISTRY[name](**kwargs)
+
+
+@pytest.fixture(autouse=True)
+def isolate_from_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Run every test from an empty working directory.
+
+    ``Settings`` resolves ``env_file=".env"`` relative to the working
+    directory, so without this the suite would silently pick up the
+    developer's real .env on top of the variables a test sets.
+    """
+    monkeypatch.chdir(tmp_path)
 
 
 @pytest.fixture
@@ -37,7 +50,7 @@ def configured_settings(
     monkeypatch.setenv("HTTP_TIMEOUT_SECONDS", "2")
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "output"))
 
-    return Settings(_env_file=None)  # type: ignore[call-arg]
+    return Settings.model_validate({})
 
 
 @pytest.fixture

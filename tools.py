@@ -1,16 +1,26 @@
-import re  # очищення назви звіту
-from pathlib import Path  # безпечна побудова шляху
-from typing import TypedDict  # контракт результату пошуку
-from urllib.parse import urlparse  # перевірка URL
+"""Research tools and their OpenAI tool-calling schemas.
 
-import httpx  # завантаження сторінки
-import trafilatura  # виділення основного текст
-from ddgs import DDGS  # пошук
-from langchain.tools import tool  # перетворення функції на LangChain tool
+Every tool reports failure as a string starting with ``"ERROR: "`` instead of
+raising: the ReAct loop feeds a tool's return value straight back to the
+model, so a failure has to arrive as readable data rather than a traceback.
 
-from config import load_settings  # отримання лімітів без глобального Settings()
+The JSON Schema next to each function is what the model actually reads. The
+mechanics of a tool, meaning what it does, when it applies and what it
+returns, belong in that ``description`` and not in the system prompt.
+"""
 
-# кожен успішний результат матиме рівно три текстові поля
+import re
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, TypedDict
+from urllib.parse import urlparse
+
+import httpx
+import trafilatura
+from ddgs import DDGS
+
+from config import load_settings
+
 SearchResult = TypedDict(
     "SearchResult",
     {
@@ -21,14 +31,30 @@ SearchResult = TypedDict(
 )
 
 
-@tool
 def web_search(query: str) -> list[SearchResult] | str:
     """Search the web and return compact candidate sources.
 
-    Use this tool to discover pages relevant to a research
-    question. Search snippets are not full source texts.
-    """
+    Parameters
+    ----------
+    query : str
+        Focused search query, passed to the search engine after stripping.
 
+    Returns
+    -------
+    list of SearchResult or str
+        Up to `Settings.max_search_results` results with distinct URLs, or a
+        message starting with ``"ERROR: "`` when the query is empty or the
+        search backend fails.
+
+    See Also
+    --------
+    read_url : Fetches the full text of one of the returned URLs.
+
+    Notes
+    -----
+    Snippets are truncated to `Settings.max_search_snippet_length`. They mark
+    candidates worth reading, not evidence to cite on their own.
+    """
     normalized_query = query.strip()
     if not normalized_query:
         return "ERROR: Search query cannot be empty."
@@ -60,12 +86,58 @@ def web_search(query: str) -> list[SearchResult] | str:
         return "ERROR: Web search is temporarily unavailable."
 
 
-@tool
+WEB_SEARCH_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "Search the web for sources relevant to a research question. "
+            "Use it to discover candidate pages, and run it again with a "
+            "different query for each distinct angle of the topic. Returns "
+            "a list of {title, url, snippet} objects, or a message starting "
+            "with ERROR:. Snippets are previews, not full page texts."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Focused search query in the language of the sources."
+                    ),
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 def read_url(url: str) -> str:
     """Read the main text content of an HTTP or HTTPS page.
 
-    Use this tool after web_search when a source needs to be
-    examined in detail.
+    Parameters
+    ----------
+    url : str
+        Absolute HTTP or HTTPS URL, normally taken from a previous
+        `web_search` result.
+
+    Returns
+    -------
+    str
+        Extracted page text, truncated to `Settings.max_url_content_length`
+        characters, or a message starting with ``"ERROR: "`` when the page
+        cannot be read.
+
+    See Also
+    --------
+    web_search : Finds candidate URLs to pass to this function.
+
+    Notes
+    -----
+    Page content is untrusted input. It is handed to the model as data and is
+    never executed as instructions.
     """
     normalized_url = url.strip()
     parsed_url = urlparse(normalized_url)
@@ -100,18 +172,65 @@ def read_url(url: str) -> str:
         return "ERROR: The page could not be read."
 
 
-@tool
+READ_URL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "read_url",
+        "description": (
+            "Read the main text of one HTTP or HTTPS page. Use it after "
+            "web_search when a candidate source has to be examined in "
+            "detail, since a snippet is not enough to cite. Returns the "
+            "extracted plain text, truncated with an explicit note when the "
+            "page is long, or a message starting with ERROR:."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": (
+                        "Absolute http:// or https:// URL, taken from a "
+                        "web_search result rather than invented."
+                    ),
+                }
+            },
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 def write_report(filename: str, content: str) -> str:
     """Save a completed Markdown research report.
 
-    The report is written as a .md file inside the configured
-    output directory.
+    Parameters
+    ----------
+    filename : str
+        Desired report name. Any directory component is dropped and the stem
+        keeps only word characters, dots and dashes.
+    content : str
+        Full Markdown text of the report.
+
+    Returns
+    -------
+    str
+        ``"Report saved to: <path>"`` on success, or a message starting with
+        ``"ERROR: "`` when the content is empty, the name sanitizes to
+        nothing, or the file cannot be written.
+
+    Notes
+    -----
+    The report always lands directly in `Settings.output_dir`: a name such as
+    ``../escape.md`` is reduced to ``escape.md`` rather than rejected.
     """
     if not content.strip():
         return "ERROR: Report content cannot be empty."
     normalized_name = filename.strip().replace("\\", "/")
     base_name = normalized_name.rsplit("/", maxsplit=1)[-1]
     stem = Path(base_name).stem
+    # re.UNICODE keeps Cyrillic and other non-ASCII letters, so a Ukrainian
+    # report name survives sanitizing instead of collapsing to nothing.
     safe_stem = re.sub(
         r"[^\w.-]",
         "",
@@ -133,3 +252,54 @@ def write_report(filename: str, content: str) -> str:
         return f"Report saved to: {report_path}"
     except Exception:
         return "ERROR: Report could not be saved."
+
+
+WRITE_REPORT_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "write_report",
+        "description": (
+            "Save the finished Markdown report to a file. Call it once, "
+            "after the research is done and the full report text is ready. "
+            "This is the only way the report reaches the user. Returns "
+            "'Report saved to: <path>' on success, or a message starting "
+            "with ERROR:."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Short descriptive name derived from the question, "
+                        "without a directory or extension; .md is added."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "The complete Markdown report, including its "
+                        "Sources section."
+                    ),
+                },
+            },
+            "required": ["filename", "content"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+# Two structures rather than one: TOOL_SCHEMAS is what the model reads,
+# TOOL_REGISTRY is what the loop calls. tests/test_tool_schemas.py fails if a
+# tool ever appears in one and not the other.
+TOOL_SCHEMAS: list[dict[str, Any]] = [
+    WEB_SEARCH_SCHEMA,
+    READ_URL_SCHEMA,
+    WRITE_REPORT_SCHEMA,
+]
+
+TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
+    "web_search": web_search,
+    "read_url": read_url,
+    "write_report": write_report,
+}

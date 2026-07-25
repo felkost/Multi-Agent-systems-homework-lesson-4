@@ -1,17 +1,22 @@
-from uuid import uuid4  # створює унікальний thread_id
+from uuid import uuid4
 
-# повідомлення моделі, результат виконання tool
 from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig  # тип конфігурації LangGraph
+from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
-from openai import OpenAIError  # базовий виняток OpenAI API
-from pydantic import ValidationError  # помилки Settings
+from openai import OpenAIError
+from pydantic import ValidationError
 
-from agent import create_research_agent  # фабрика
-from config import load_settings  # фабрика конфігурації
+from agent import create_research_agent
+from config import load_settings
 
 
 def main() -> None:
+    """Run the interactive research REPL.
+
+    Reads questions from the terminal until the user types ``exit`` or sends
+    EOF, printing the name of each tool the agent calls and, once the agent
+    stops calling tools, the final answer.
+    """
     print("Research Agent (type 'exit' to quit)")
     print("-" * 40)
 
@@ -19,7 +24,7 @@ def main() -> None:
         settings = load_settings()
         agent = create_research_agent(settings)
     except ValidationError:
-        print("Configuration error: check OPENAI_API_KEY " "and values in .env.")
+        print("Configuration error: check OPENAI_API_KEY and values in .env.")
         return
 
     thread_id = str(uuid4())
@@ -46,10 +51,9 @@ def main() -> None:
 
         final_answer: str | None = None
         try:
-            # Чому фінальна відповідь не дублюється
-            # Під час streaming можуть надходити різні AIMessage.
-            # Якщо друкувати кожне одразу,
-            # проміжний текст можна показати кілька разів
+            # Keep the last answer instead of printing every AIMessage as it
+            # arrives: a streamed run emits several, and printing each one
+            # would show intermediate text as if it were the answer.
             for chunk in agent.stream(
                 {"messages": [("user", user_input)]},
                 config=config,
@@ -74,8 +78,8 @@ def main() -> None:
                             final_answer = message.content
 
         except OpenAIError:
-            # Мета: не завершувати CLI через помилку одного API-запиту та
-            # дозволити користувачу перервати виконання.
+            # One failed API request must not end the session: the user may
+            # want to retry the same question or ask a different one.
             print(
                 "\nAgent error: OpenAI API request failed. "
                 "Check the API key and connection."

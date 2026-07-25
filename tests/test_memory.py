@@ -61,7 +61,7 @@ def settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Settings:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    return Settings(_env_file=None)  # type: ignore[call-arg]
+    return Settings.model_validate({})
 
 
 def _thread_config(thread_id: str) -> RunnableConfig:
