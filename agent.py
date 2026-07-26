@@ -27,6 +27,7 @@ from config import (
     BUDGET_NUDGE_MESSAGE,
     ERROR_PREFIX,
     FALLBACK_REPORT_REQUEST,
+    FALLBACK_STRUCTURED_REPORT_REQUEST,
     REPORT_SAVED_PREFIX,
     Settings,
     build_system_prompt,
@@ -762,7 +763,9 @@ def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> 
     Both have trade-offs.
     <BLANKLINE>
     ## Findings
-    RAG wins on cost. [1](#source-1)
+    RAG wins on cost.
+    <BLANKLINE>
+    [1](#source-1)
     <BLANKLINE>
     ## Limitations
     Only two sources were read.
@@ -790,7 +793,9 @@ def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> 
             for url in dict.fromkeys(section.source_urls)
             if url in numbers
         )
-        body = f"{section.body} {references}" if references else section.body
+        # Own paragraph, not appended inline: a body ending in a Markdown
+        # table swallowed the markers into its last cell (stage-7 A/B).
+        body = f"{section.body}\n\n{references}" if references else section.body
         lines += ["", f"## {section.heading}", body]
     lines += ["", "## Limitations", report.limitations, "", "## Sources"]
 
@@ -1035,15 +1040,22 @@ class ResearchAgent:
         instead of trusting the model to count correctly. A model or request
         that does not support strict structured output falls back to a plain
         `create()` call with free-form markdown.
+
+        The two paths ask for different things on purpose. Only the
+        structured one is followed by `render_report`, so only it can tell
+        the model that citation markers are added for it; saying the same
+        on the plain path would leave that report with no citations at all.
         """
-        messages = [
-            *self._messages,
-            {"role": "user", "content": FALLBACK_REPORT_REQUEST},
-        ]
         try:
             completion = self._client.chat.completions.parse(
                 model=self._settings.model_name,
-                messages=messages,
+                messages=[
+                    *self._messages,
+                    {
+                        "role": "user",
+                        "content": FALLBACK_STRUCTURED_REPORT_REQUEST,
+                    },
+                ],
                 response_format=ResearchReport,
             )
             report = completion.choices[0].message.parsed
@@ -1053,7 +1065,10 @@ class ResearchAgent:
             pass
         response = self._client.chat.completions.create(
             model=self._settings.model_name,
-            messages=messages,
+            messages=[
+                *self._messages,
+                {"role": "user", "content": FALLBACK_REPORT_REQUEST},
+            ],
             temperature=self._settings.temperature,
         )
         return response.choices[0].message.content
