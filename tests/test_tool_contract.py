@@ -10,6 +10,7 @@ name is resolved to a callable.
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import Mock
+import re
 
 import httpx
 import pytest
@@ -536,18 +537,19 @@ def test_write_report_rejects_filename_with_no_safe_characters() -> None:
 
 
 @pytest.mark.parametrize(
-    ("filename", "expected_name"),
+    ("filename", "expected_stem"),
     [
-        ("report", "report.md"),
-        ("report.txt", "report.md"),
-        ("../test-report.txt", "test-report.md"),
-        (r"..\..\windows.exe", "windows.md"),
+        ("report", "report"),
+        ("report.txt", "report"),
+        ("../test-report.txt", "test-report"),
+        (r"..\..\windows.exe", "windows"),
+        ("a" * 60, "a" * 40),
     ],
 )
 def test_write_report_keeps_path_inside_output(
     configured_settings: Settings,
     filename: str,
-    expected_name: str,
+    expected_stem: str,
 ) -> None:
     content = "# Тестовий звіт\n\nТекст українською."
 
@@ -559,9 +561,10 @@ def test_write_report_keeps_path_inside_output(
     report_path = Path(result.removeprefix("Report saved to: "))
     output_directory = Path(configured_settings.output_dir).resolve()
 
-    assert report_path == (output_directory / expected_name).resolve()
     assert report_path.parent == output_directory
-    assert report_path.suffix == ".md"
+    assert re.fullmatch(
+        rf"\d{{8}}-\d{{6}}_{re.escape(expected_stem)}\.md", report_path.name
+    )
     assert report_path.read_text(encoding="utf-8") == content
 
 

@@ -5,6 +5,7 @@ search backend is patched, while the tools themselves run for real.
 """
 
 import json
+import re
 from typing import Any
 from unittest.mock import MagicMock, Mock
 
@@ -39,6 +40,19 @@ def _agent(
 ) -> tuple[ResearchAgent, ScriptedChatClient]:
     client = ScriptedChatClient(script)
     return ResearchAgent(configured_settings, client=client), client
+
+
+def _patch_read_url(monkeypatch: pytest.MonkeyPatch, *, text: str = "Hello") -> None:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.headers = {"content-type": "text/html; charset=utf-8"}
+    response.iter_bytes.return_value = [b"<html><body><p>Hello</p></body></html>"]
+    response.encoding = "utf-8"
+    stream_context = MagicMock()
+    stream_context.__enter__.return_value = response
+    stream_context.__exit__.return_value = False
+    monkeypatch.setattr(tools.httpx, "stream", Mock(return_value=stream_context))
+    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value=text))
 
 
 def test_single_tool_exchange_extends_history(
@@ -377,36 +391,69 @@ def test_saved_report_path_is_reported(configured_settings: Settings) -> None:
 
     assert result.report_source == "tool"
     assert result.saved_report_path is not None
-    assert result.saved_report_path.endswith("rag.md")
+    assert re.fullmatch(r".*[/\\]\d{8}-\d{6}_rag\.md", result.saved_report_path)
 
 
-def test_last_iteration_forces_write_report(configured_settings: Settings) -> None:
-    configured_settings.max_iterations = 1
-    client = ScriptedChatClient([ScriptedTurn(content="Best effort report.")])
+def test_last_iteration_forces_write_report(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_read_url(monkeypatch)
+    configured_settings.max_iterations = 2
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(
+                tool_calls=[("write_report", {"filename": "r", "content": "# R\n"})]
+            ),
+        ]
+    )
     agent = ResearchAgent(configured_settings, client=client)
 
     agent.run("Research something huge.")
 
-    assert client.requests[0]["tool_choice"] == {
+    assert client.requests[1]["tool_choice"] == {
         "type": "function",
         "function": {"name": "write_report"},
     }
 
 
 def test_budget_nudge_not_persisted_in_history(
+    monkeypatch: pytest.MonkeyPatch,
     configured_settings: Settings,
 ) -> None:
-    configured_settings.max_iterations = 1
-    client = ScriptedChatClient([ScriptedTurn(content="Best effort report.")])
+    _patch_read_url(monkeypatch)
+    configured_settings.max_iterations = 2
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(
+                tool_calls=[("write_report", {"filename": "r", "content": "# R\n"})]
+            ),
+        ]
+    )
     agent = ResearchAgent(configured_settings, client=client)
 
     agent.run("Research something huge.")
 
-    assert client.requests[0]["messages"][-1] == BUDGET_NUDGE_MESSAGE
+    assert client.requests[1]["messages"][-1] == BUDGET_NUDGE_MESSAGE
     assert all(
         message.get("content") != BUDGET_NUDGE_MESSAGE["content"]
         for message in agent.messages
     )
+
+
+def test_forced_write_report_skipped_without_reads(
+    configured_settings: Settings,
+) -> None:
+    configured_settings.max_iterations = 1
+    client = ScriptedChatClient([ScriptedTurn(content="I could not research this.")])
+    agent = ResearchAgent(configured_settings, client=client)
+
+    agent.run("Research something huge.")
+
+    assert client.requests[0]["tool_choice"] == "auto"
+    assert client.requests[0]["messages"][-1] != BUDGET_NUDGE_MESSAGE
 
 
 def test_forced_write_report_skipped_when_already_saved(
@@ -509,16 +556,7 @@ def test_successful_read_url_increments_state(
     monkeypatch: pytest.MonkeyPatch,
     configured_settings: Settings,
 ) -> None:
-    response = MagicMock()
-    response.raise_for_status.return_value = None
-    response.headers = {"content-type": "text/html; charset=utf-8"}
-    response.iter_bytes.return_value = [b"<html><body><p>Hello</p></body></html>"]
-    response.encoding = "utf-8"
-    stream_context = MagicMock()
-    stream_context.__enter__.return_value = response
-    stream_context.__exit__.return_value = False
-    monkeypatch.setattr(tools.httpx, "stream", Mock(return_value=stream_context))
-    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Hello"))
+    _patch_read_url(monkeypatch)
 
     client = ScriptedChatClient(
         [ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})])]

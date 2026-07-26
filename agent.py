@@ -6,24 +6,27 @@ checkpointer, no graph, no framework state.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionMessage,
     ChatCompletionMessageToolCallUnion,
 )
+from pydantic import BaseModel, ValidationError
 
 from config import (
     BUDGET_NUDGE_MESSAGE,
     ERROR_PREFIX,
+    FALLBACK_REPORT_REQUEST,
     REPORT_SAVED_PREFIX,
     SYSTEM_PROMPT,
     Settings,
 )
-from tools import TOOL_REGISTRY, TOOL_SCHEMAS
+from tools import TOOL_REGISTRY, TOOL_SCHEMAS, write_report
 
 Messages = list[dict[str, Any]]
 
@@ -48,7 +51,10 @@ class CompletionsProtocol(Protocol):
     The parameters are named but typed ``Any`` on purpose. Spelling out the
     SDK's own parameter types would make the real client fail this protocol
     check: its ``create`` is overloaded and expects TypedDict unions rather
-    than the plain dicts this project builds.
+    than the plain dicts this project builds. ``tools``, ``tool_choice`` and
+    ``parallel_tool_calls`` default to ``None``: the completion gate's
+    fallback call omits all three on purpose, since a request with no tools
+    is the guarantee that the model cannot go search instead of writing.
     """
 
     def create(
@@ -56,11 +62,19 @@ class CompletionsProtocol(Protocol):
         *,
         model: Any,
         messages: Any,
-        tools: Any,
-        tool_choice: Any,
         temperature: Any,
-        parallel_tool_calls: Any,
+        tools: Any = None,
+        tool_choice: Any = None,
+        parallel_tool_calls: Any = None,
     ) -> ChatCompletion: ...
+
+    def parse(
+        self,
+        *,
+        model: Any,
+        messages: Any,
+        response_format: Any,
+    ) -> Any: ...
 
 
 class ChatProtocol(Protocol):
@@ -291,9 +305,10 @@ def react_step(
     state : RunState
         Updated in place by the tool calls of this step.
     force_write_report : bool, optional
-        Requested by the caller on the last iteration. Only takes effect when
-        no report has been saved yet: forcing it again after a successful
-        save would loop the model into writing forever.
+        Requested by the caller on the last iteration. Takes effect only when
+        no report has been saved yet and at least one source was read: forcing
+        it after a successful save would loop the model into writing forever,
+        and forcing it with no evidence makes the model invent its sources.
 
     Returns
     -------
@@ -307,7 +322,14 @@ def react_step(
     request in which a ``tool_call_id`` has no assistant message announcing
     it, so this ordering is part of the protocol, not bookkeeping.
     """
-    force = force_write_report and state.saved_report_path is None
+    force = (
+        force_write_report
+        and state.saved_report_path is None
+        # A forced write with nothing read produces a complete-looking report
+        # whose sources no tool ever returned -- observed directly in the K.3
+        # max_iterations=1 experiment, not hypothesised.
+        and state.successful_reads > 0
+    )
     # The nudge is a request-only addition: request_messages carries it to
     # the API, but `updated` (the persisted history) is built from the
     # original `messages` a few lines down, so the next question never sees
@@ -358,6 +380,105 @@ def react_step(
     return StepResult(updated, steps, None, None)
 
 
+def _build_report_filename(question: str) -> str:
+    """Build a fallback report filename from the user's question.
+
+    Parameters
+    ----------
+    question : str
+        The user's question for this turn.
+
+    Returns
+    -------
+    str
+        A slug derived from the question, without a directory or extension.
+        ``write_report`` sanitizes, caps the length, and timestamps it
+        further, so this name only has to be descriptive, not unique,
+        already safe, or already short.
+
+    Examples
+    --------
+    >>> _build_report_filename("What is RAG?")
+    'research_what_is_rag'
+    """
+    slug = re.sub(r"[^\w]+", "_", question.lower(), flags=re.UNICODE).strip("_")
+    return f"research_{slug or 'report'}"
+
+
+class SourceRef(BaseModel):
+    """One source the fallback report cites, in citation order."""
+
+    url: str
+    title: str
+
+
+class ReportSection(BaseModel):
+    """One body section of a synthesized report."""
+
+    heading: str
+    body: str
+
+
+class ResearchReport(BaseModel):
+    """Structured shape the model fills in when it never wrote a report."""
+
+    title: str
+    summary: str
+    sections: list[ReportSection]
+    limitations: str
+    sources: list[SourceRef]
+
+
+def render_report(report: ResearchReport) -> str:
+    """Render a structured report into the Markdown ``write_report`` expects.
+
+    Parameters
+    ----------
+    report : ResearchReport
+        Structured content the model produced via ``chat.completions.parse``.
+
+    Returns
+    -------
+    str
+        Markdown text, with a numbered ``## Sources`` section whose anchors
+        are built entirely from list order -- the model never has to count
+        sources itself.
+
+    Examples
+    --------
+    >>> report = ResearchReport(
+    ...     title="RAG vs long context",
+    ...     summary="Both have trade-offs.",
+    ...     sections=[ReportSection(heading="Findings", body="RAG wins on cost.")],
+    ...     limitations="Only two sources were read.",
+    ...     sources=[SourceRef(url="https://example.com", title="Example")],
+    ... )
+    >>> print(render_report(report))
+    # RAG vs long context
+    <BLANKLINE>
+    ## Summary
+    Both have trade-offs.
+    <BLANKLINE>
+    ## Findings
+    RAG wins on cost.
+    <BLANKLINE>
+    ## Limitations
+    Only two sources were read.
+    <BLANKLINE>
+    ## Sources
+    <a id="source-1"></a>1. [Example](https://example.com)
+    """
+    lines = [f"# {report.title}", "", "## Summary", report.summary]
+    for section in report.sections:
+        lines += ["", f"## {section.heading}", section.body]
+    lines += ["", "## Limitations", report.limitations, "", "## Sources"]
+    for index, source in enumerate(report.sources, start=1):
+        lines.append(
+            f'<a id="source-{index}"></a>{index}. [{source.title}]({source.url})'
+        )
+    return "\n".join(lines)
+
+
 class ResearchAgent:
     """Research agent that runs its own ReAct loop.
 
@@ -379,7 +500,11 @@ class ResearchAgent:
         self._settings = settings
         if client is None:
             client = OpenAI(api_key=settings.api_key.get_secret_value())
-        self._client = client
+        # Annotated explicitly: without it, mypy narrows the attribute to the
+        # concrete OpenAI type through this conditional assignment, and any
+        # later call through self._client is then checked against the SDK's
+        # own strict overloads instead of this Protocol.
+        self._client: LLMClient = client
         system_prompt = SYSTEM_PROMPT.format(max_iterations=settings.max_iterations)
         self._messages: Messages = [{"role": "system", "content": system_prompt}]
 
@@ -431,7 +556,7 @@ class ResearchAgent:
         # otherwise leave a tool_call_id without its tool result, and every
         # later request would fail with HTTP 400.
         self._messages = step.messages
-        return self._finish(step, steps, state, iteration)
+        return self._finish(step, steps, state, iteration, user_input)
 
     def _finish(
         self,
@@ -439,15 +564,119 @@ class ResearchAgent:
         steps: list[ToolStep],
         state: RunState,
         iterations_used: int,
+        question: str,
     ) -> AgentResult:
         """Assemble the result of a finished turn."""
         stop_reason: StopReason = step.stop_reason or "iteration_limit"
+        saved_report_path, report_source = self._ensure_report_saved(state, question)
         return AgentResult(
             final_answer=step.final_answer,
             steps=steps,
             iterations_used=iterations_used,
             budget_exhausted=step.stop_reason is None,
             stop_reason=stop_reason,
-            saved_report_path=state.saved_report_path,
-            report_source="tool" if state.saved_report_path is not None else "none",
+            saved_report_path=saved_report_path,
+            report_source=report_source,
         )
+
+    def _ensure_report_saved(
+        self, state: RunState, question: str
+    ) -> tuple[str | None, ReportSource]:
+        """Decide what report this turn produced, once the loop has ended.
+
+        Parameters
+        ----------
+        state : RunState
+            What the turn's tool calls accumulated.
+        question : str
+            The user's question, used to name a fallback report file.
+
+        Returns
+        -------
+        tuple of (str or None, ReportSource)
+            Path of the saved report, and how that file came to exist.
+
+        Notes
+        -----
+        The guarantee lives here, in Python after the loop, rather than in
+        the system prompt: an instruction the model is asked to follow is
+        not something the code can rely on.
+
+        A turn with no successful read and no attempted report is treated as
+        a non-research turn (e.g. "where did you save it?"): a report with
+        no evidence behind it has no value, and writing one on every reply
+        would litter `output/` with noise.
+
+        When the model attempted `write_report` but the call failed, this
+        retries with the same markdown under a filename built from the
+        question, deliberately not the model's own filename: reusing it
+        would repeat the exact failure whenever the name itself was the
+        problem, as happened during this stage's own K.3 probe, where a
+        forced write reused a name that collided with an existing report.
+
+        When the model never attempted `write_report` at all, one extra
+        model call asks for the report directly -- see
+        `_request_report_markdown`.
+        """
+        if state.saved_report_path is not None:
+            return state.saved_report_path, "tool"
+        if state.successful_reads == 0 and state.last_report_markdown is None:
+            return None, "none"
+
+        markdown = state.last_report_markdown
+        if markdown is None:
+            markdown = self._request_report_markdown()
+        if markdown is None or not markdown.strip():
+            return None, "none"
+
+        result = write_report(
+            filename=_build_report_filename(question), content=markdown
+        )
+        if result.startswith(REPORT_SAVED_PREFIX):
+            return result.removeprefix(REPORT_SAVED_PREFIX).strip(), "fallback"
+        return None, "none"
+
+    def _request_report_markdown(self) -> str | None:
+        """Ask the model for a final report with no tools available.
+
+        Returns
+        -------
+        str or None
+            The model's markdown, or ``None`` if it returned nothing.
+
+        Notes
+        -----
+        Called only when the loop read at least one source but the model
+        never attempted `write_report`. The request is transient: neither
+        this prompt nor the response is appended to `self._messages`, so the
+        next question does not open with "your budget is exhausted." Passing
+        no `tools` is itself the guarantee that the model cannot go search
+        instead of writing -- there is nothing left it could call.
+
+        `parse()` is tried first: a structured `ResearchReport` means the
+        renderer builds source numbering and anchors deterministically,
+        instead of trusting the model to count correctly. A model or request
+        that does not support strict structured output falls back to a plain
+        `create()` call with free-form markdown.
+        """
+        messages = [
+            *self._messages,
+            {"role": "user", "content": FALLBACK_REPORT_REQUEST},
+        ]
+        try:
+            completion = self._client.chat.completions.parse(
+                model=self._settings.model_name,
+                messages=messages,
+                response_format=ResearchReport,
+            )
+            report = completion.choices[0].message.parsed
+            if report is not None:
+                return render_report(report)
+        except (BadRequestError, ValidationError):
+            pass
+        response = self._client.chat.completions.create(
+            model=self._settings.model_name,
+            messages=messages,
+            temperature=self._settings.temperature,
+        )
+        return response.choices[0].message.content
