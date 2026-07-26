@@ -7,7 +7,7 @@ in the output directory.
 
 import re
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -92,6 +92,44 @@ def test_no_report_when_search_only(
     assert _saved_reports(configured_settings) == []
 
 
+def _patch_read_url(monkeypatch: pytest.MonkeyPatch, *, text: str = "Hello") -> None:
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.headers = {"content-type": "text/html; charset=utf-8"}
+    response.iter_bytes.return_value = [b"<html><body><p>Hello</p></body></html>"]
+    response.encoding = "utf-8"
+    stream_context = MagicMock()
+    stream_context.__enter__.return_value = response
+    stream_context.__exit__.return_value = False
+    monkeypatch.setattr(tools.httpx, "stream", Mock(return_value=stream_context))
+    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value=text))
+
+
+def test_fallback_asks_model_when_no_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_read_url(monkeypatch)
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(content="Here is what I found, in prose."),
+            ScriptedTurn(content="# Report\n\nSynthesized from what was read.\n"),
+        ]
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+
+    result = agent.run("What is RAG?")
+
+    assert result.report_source == "fallback"
+    assert result.saved_report_path is not None
+    assert Path(result.saved_report_path).read_text(encoding="utf-8") == (
+        "# Report\n\nSynthesized from what was read.\n"
+    )
+    assert len(client.requests) == 3
+    assert "tools" not in client.requests[2]
+
+
 def test_fallback_reuses_markdown_from_failed_write(
     configured_settings: Settings,
 ) -> None:
@@ -111,4 +149,3 @@ def test_fallback_reuses_markdown_from_failed_write(
     assert result.saved_report_path is not None
     assert Path(result.saved_report_path).read_text(encoding="utf-8") == "# RAG\n"
     assert len(client.requests) == 2
-    

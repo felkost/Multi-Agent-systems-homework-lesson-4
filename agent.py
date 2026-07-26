@@ -20,6 +20,7 @@ from openai.types.chat import (
 from config import (
     BUDGET_NUDGE_MESSAGE,
     ERROR_PREFIX,
+    FALLBACK_REPORT_REQUEST,
     REPORT_SAVED_PREFIX,
     SYSTEM_PROMPT,
     Settings,
@@ -49,7 +50,10 @@ class CompletionsProtocol(Protocol):
     The parameters are named but typed ``Any`` on purpose. Spelling out the
     SDK's own parameter types would make the real client fail this protocol
     check: its ``create`` is overloaded and expects TypedDict unions rather
-    than the plain dicts this project builds.
+    than the plain dicts this project builds. ``tools``, ``tool_choice`` and
+    ``parallel_tool_calls`` default to ``None``: the completion gate's
+    fallback call omits all three on purpose, since a request with no tools
+    is the guarantee that the model cannot go search instead of writing.
     """
 
     def create(
@@ -57,10 +61,10 @@ class CompletionsProtocol(Protocol):
         *,
         model: Any,
         messages: Any,
-        tools: Any,
-        tool_choice: Any,
         temperature: Any,
-        parallel_tool_calls: Any,
+        tools: Any = None,
+        tool_choice: Any = None,
+        parallel_tool_calls: Any = None,
     ) -> ChatCompletion: ...
 
 
@@ -412,7 +416,11 @@ class ResearchAgent:
         self._settings = settings
         if client is None:
             client = OpenAI(api_key=settings.api_key.get_secret_value())
-        self._client = client
+        # Annotated explicitly: without it, mypy narrows the attribute to the
+        # concrete OpenAI type through this conditional assignment, and any
+        # later call through self._client is then checked against the SDK's
+        # own strict overloads instead of this Protocol.
+        self._client: LLMClient = client
         system_prompt = SYSTEM_PROMPT.format(max_iterations=settings.max_iterations)
         self._messages: Messages = [{"role": "system", "content": system_prompt}]
 
@@ -521,6 +529,10 @@ class ResearchAgent:
         would repeat the exact failure whenever the name itself was the
         problem, as happened during this stage's own K.3 probe, where a
         forced write reused a name that collided with an existing report.
+
+        When the model never attempted `write_report` at all, one extra
+        model call asks for the report directly -- see
+        `_request_report_markdown`.
         """
         if state.saved_report_path is not None:
             return state.saved_report_path, "tool"
@@ -528,6 +540,8 @@ class ResearchAgent:
             return None, "none"
 
         markdown = state.last_report_markdown
+        if markdown is None:
+            markdown = self._request_report_markdown()
         if markdown is None or not markdown.strip():
             return None, "none"
 
@@ -537,3 +551,31 @@ class ResearchAgent:
         if result.startswith(REPORT_SAVED_PREFIX):
             return result.removeprefix(REPORT_SAVED_PREFIX).strip(), "fallback"
         return None, "none"
+
+    def _request_report_markdown(self) -> str | None:
+        """Ask the model for a final report with no tools available.
+
+        Returns
+        -------
+        str or None
+            The model's markdown, or ``None`` if it returned nothing.
+
+        Notes
+        -----
+        Called only when the loop read at least one source but the model
+        never attempted `write_report`. The request is transient: neither
+        this prompt nor the response is appended to `self._messages`, so the
+        next question does not open with "your budget is exhausted." Passing
+        no `tools` is itself the guarantee that the model cannot go search
+        instead of writing -- there is nothing left it could call.
+        """
+        messages = [
+            *self._messages,
+            {"role": "user", "content": FALLBACK_REPORT_REQUEST},
+        ]
+        response = self._client.chat.completions.create(
+            model=self._settings.model_name,
+            messages=messages,
+            temperature=self._settings.temperature,
+        )
+        return response.choices[0].message.content
