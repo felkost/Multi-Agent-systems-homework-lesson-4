@@ -218,3 +218,19 @@ def test_agent_starts_the_session_with_the_selected_prompt(
         "role": "system",
         "content": f"Prompt under test, {settings.max_iterations} turns.",
     }
+
+
+def test_v2_example_avoids_the_agents_own_subject_matter() -> None:
+    """The worked example must not be about what the agent gets asked.
+
+    Measured on 35 real runs: with a RAG-topic example, 30 of 30 opened
+    with the example's literal first query, `"naive RAG pipeline
+    explained"`; with the same example rewritten about databases, 0 of 5
+    did. A topic-matched example stops being a format demonstration and
+    becomes an answer key. Plan L.4 rules out the obvious alternative
+    (more examples), so the lever is the topic of the one example.
+    """
+    example = SYSTEM_PROMPTS["v2"].split("# Example")[1]
+
+    assert "RAG" not in example
+    assert "retrieval" not in example.lower()

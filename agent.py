@@ -702,6 +702,15 @@ class ResearchReport(BaseModel):
     sources: list[SourceRef]
 
 
+# Headings `render_report` writes itself, each from its own schema field.
+# A model section carrying one of these names produced the heading twice
+# (seen in 1 report of 5), so such a section is folded into the block that
+# owns the name instead of printing a second one -- folded rather than
+# dropped, since the model wrote that text and losing it silently would be
+# the same class of dishonesty as silently rewriting it.
+_OWN_HEADINGS = ("summary", "limitations", "sources")
+
+
 def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> str:
     """Render a structured report into the Markdown ``write_report`` expects.
 
@@ -786,8 +795,7 @@ def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> 
                 cited.append(url)
     numbers = {url: index for index, url in enumerate(cited, start=1)}
 
-    lines = [f"# {report.title}", "", "## Summary", report.summary]
-    for section in report.sections:
+    def rendered(section: ReportSection) -> str:
         references = " ".join(
             f"[{numbers[url]}](#source-{numbers[url]})"
             for url in dict.fromkeys(section.source_urls)
@@ -795,9 +803,21 @@ def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> 
         )
         # Own paragraph, not appended inline: a body ending in a Markdown
         # table swallowed the markers into its last cell (stage-7 A/B).
-        body = f"{section.body}\n\n{references}" if references else section.body
-        lines += ["", f"## {section.heading}", body]
-    lines += ["", "## Limitations", report.limitations, "", "## Sources"]
+        return f"{section.body}\n\n{references}" if references else section.body
+
+    body_sections: list[ReportSection] = []
+    folded: dict[str, list[ReportSection]] = {name: [] for name in _OWN_HEADINGS}
+    for section in report.sections:
+        folded.get(section.heading.strip().lower(), body_sections).append(section)
+
+    lines = [f"# {report.title}", "", "## Summary", report.summary]
+    lines += [line for s in folded["summary"] for line in ("", rendered(s))]
+    for section in body_sections:
+        lines += ["", f"## {section.heading}", rendered(section)]
+    lines += ["", "## Limitations", report.limitations]
+    lines += [line for s in folded["limitations"] for line in ("", rendered(s))]
+    lines += ["", "## Sources"]
+    lines += [line for s in folded["sources"] for line in (rendered(s), "")]
 
     if cited:
         entries = [(numbers[url], titles[url], url) for url in cited]

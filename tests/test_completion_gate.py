@@ -731,3 +731,59 @@ def test_plain_text_fallback_uses_the_plain_request(
     agent.run("What is RAG?")
 
     assert client.requests[2]["messages"][-1]["content"] == FALLBACK_REPORT_REQUEST
+
+
+def test_rendered_report_does_not_repeat_a_heading_it_owns() -> None:
+    """T2: `render_report` emits `## Limitations` from the dedicated field,
+    so a model section carrying the same name produced the heading twice --
+    seen in 1 of 5 reports, the two copies saying slightly different
+    things."""
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[
+            ReportSection(
+                heading="Findings", body="Claim.", source_urls=["https://a.example"]
+            ),
+            ReportSection(heading="Limitations", body="The sources disagree."),
+        ],
+        limitations="Benchmarks were unavailable.",
+        sources=[SourceRef(url="https://a.example", title="A")],
+    )
+
+    rendered = render_report(report)
+
+    assert rendered.count("## Limitations") == 1
+
+
+def test_rendered_report_keeps_the_text_of_a_folded_section() -> None:
+    """Folded, not dropped: the model wrote that text and silently losing
+    it would be the same class of dishonesty as silently rewriting it."""
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[ReportSection(heading="Limitations", body="The sources disagree.")],
+        limitations="Benchmarks were unavailable.",
+        sources=[],
+    )
+
+    rendered = render_report(report)
+
+    assert "Benchmarks were unavailable." in rendered
+    assert "The sources disagree." in rendered
+
+
+def test_rendered_report_folds_a_colliding_summary_section() -> None:
+    report = ResearchReport(
+        title="T",
+        summary="The field summary.",
+        sections=[ReportSection(heading="summary", body="The section summary.")],
+        limitations="L",
+        sources=[],
+    )
+
+    rendered = render_report(report)
+
+    assert rendered.count("## Summary") == 1
+    assert "The field summary." in rendered
+    assert "The section summary." in rendered
