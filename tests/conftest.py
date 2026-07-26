@@ -2,16 +2,26 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pytest  # noqa: E402
+from langsmith.utils import get_env_var  # noqa: E402
 
+import agent  # noqa: E402
 import tools  # noqa: E402
 from config import Settings  # noqa: E402
+
+_TRACING_ENVIRONMENT = (
+    *agent._TRACING_FLAGS,
+    "LANGSMITH_API_KEY",
+    "LANGSMITH_PROJECT",
+    "LANGSMITH_ENDPOINT",
+    "LANGSMITH_WORKSPACE_ID",
+)
 
 
 def call_tool(name: str, **kwargs: Any) -> Any:
@@ -36,6 +46,21 @@ def isolate_from_dotenv(
     developer's real .env on top of the variables a test sets.
     """
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def isolate_tracing_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep one test's tracing configuration out of the next one.
+
+    ``configure_tracing`` assigns to ``os.environ`` directly, and monkeypatch
+    can only roll back a name it already knows about, so every tracing
+    variable is registered here whether the test touches it or not. The SDK
+    caches these lookups (``lru_cache`` on ``get_env_var``), so the cache is
+    dropped too: a stale ``true`` would send a later test at a real endpoint.
+    """
+    for name in _TRACING_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
+    cast(Any, get_env_var).cache_clear()
 
 
 @pytest.fixture

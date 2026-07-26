@@ -7,8 +7,8 @@ from urllib.parse import urlsplit, urlunsplit
 from openai import APIError, OpenAIError
 from pydantic import ValidationError
 
-from agent import ResearchAgent, SessionState, ToolStep
-from config import load_settings
+from agent import ResearchAgent, SessionState, ToolStep, configure_tracing
+from config import Settings, load_settings
 
 _MAX_ARGUMENT_LENGTH = 80
 _MAX_RESULT_PREVIEW = 60
@@ -116,6 +116,38 @@ def format_session_stats(session: SessionState) -> str:
     return "\n".join(lines)
 
 
+def format_tracing_notice(settings: Settings, active: bool) -> str | None:
+    """Say where this session's traces go, or why they go nowhere.
+
+    Parameters
+    ----------
+    settings : Settings
+        Configuration for this session.
+    active : bool
+        What `configure_tracing` decided.
+
+    Returns
+    -------
+    str or None
+        One line for the console, or ``None`` when tracing is off and nobody
+        asked for it -- the default needs no announcement.
+
+    Notes
+    -----
+    The second branch is the reason this function exists: tracing switched on
+    without a key is a request that silently does nothing, which is the same
+    class of failure this stage removed from `configure_tracing` itself.
+    """
+    if active:
+        return f"LangSmith: tracing to project {settings.langsmith_project}."
+    if settings.langsmith_tracing:
+        return (
+            "LangSmith: tracing is enabled but LANGSMITH_API_KEY is missing "
+            "-- this session is not traced."
+        )
+    return None
+
+
 def main() -> None:
     """Run the interactive research REPL.
 
@@ -138,6 +170,13 @@ def main() -> None:
     except ValidationError:
         print("Configuration error: check OPENAI_API_KEY and values in .env.")
         return
+
+    # The agent configures tracing again when it builds its own client; the
+    # call is idempotent, and doing it here is what lets the REPL report the
+    # decision instead of leaving the user to guess.
+    notice = format_tracing_notice(settings, configure_tracing(settings))
+    if notice is not None:
+        print(notice)
 
     agent = ResearchAgent(settings)
 

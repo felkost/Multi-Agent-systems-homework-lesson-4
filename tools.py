@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import httpx
 import trafilatura
 from ddgs import DDGS
+from langsmith import traceable
 
 from config import REPORT_SAVED_PREFIX, load_settings
 
@@ -33,6 +34,7 @@ SearchResult = TypedDict(
 )
 
 
+@traceable(run_type="tool", name="web_search")
 def web_search(query: str) -> list[SearchResult] | str:
     """Search the web and return compact candidate sources.
 
@@ -131,6 +133,7 @@ READABLE_MEDIA_TYPES: frozenset[str] = frozenset(
 )
 
 
+@traceable(run_type="tool", name="read_url")
 def read_url(url: str) -> str:
     """Read the main text content of an HTTP or HTTPS page.
 
@@ -301,6 +304,7 @@ def _timestamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
+@traceable(run_type="tool", name="write_report")
 def write_report(filename: str, content: str) -> str:
     """Save a completed Markdown research report.
 

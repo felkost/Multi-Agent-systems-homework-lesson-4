@@ -40,12 +40,19 @@ def _schema_from_signature(func: Callable[..., Any]) -> dict[str, Any]:
     >>> def read_url(url: str) -> str: ...
     >>> _schema_from_signature(read_url)["required"]
     ['url']
+
+    Notes
+    -----
+    Unwrapped first: ``@traceable`` adds a ``config`` keyword of its own to
+    every tool it wraps, and that parameter belongs to LangSmith rather than
+    to the contract the model is shown.
     """
-    hints = get_type_hints(func)
+    implementation = inspect.unwrap(func)
+    hints = get_type_hints(implementation)
     properties: dict[str, Any] = {}
     required: list[str] = []
 
-    for name, parameter in inspect.signature(func).parameters.items():
+    for name, parameter in inspect.signature(implementation).parameters.items():
         properties[name] = {"type": _JSON_TYPES[hints[name]]}
         if parameter.default is inspect.Parameter.empty:
             required.append(name)

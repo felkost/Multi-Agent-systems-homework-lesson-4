@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     max_consecutive_tool_errors: int = Field(default=3, ge=1, le=10)
     output_dir: str = "output"
 
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str = "research-agent-hl4"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    # Only an organization-scoped key needs this: it names the workspace the
+    # traces belong to, and LangSmith rejects such a key without it.
+    langsmith_workspace_id: str | None = None
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -60,6 +68,10 @@ def load_settings() -> Settings:
 # they cannot be spelled out a second time at the call sites.
 ERROR_PREFIX = "ERROR: "
 REPORT_SAVED_PREFIX = "Report saved to: "
+
+# Recorded on every traced run so stage 8 can compare prompt revisions in
+# LangSmith instead of guessing which run used which text.
+PROMPT_VERSION = "v1"
 
 
 SYSTEM_PROMPT = """
