@@ -20,6 +20,44 @@ def test_every_registered_version_is_non_empty(version: str) -> None:
     assert SYSTEM_PROMPTS[version].strip()
 
 
+def test_v2_min_contains_its_three_sections() -> None:
+    prompt = SYSTEM_PROMPTS["v2-min"]
+
+    assert "# Role" in prompt
+    assert "## Core rules" in prompt
+    assert "# Output contract" in prompt
+
+
+def test_v2_min_has_no_later_rung_sections() -> None:
+    prompt = SYSTEM_PROMPTS["v2-min"]
+
+    for marker in (
+        "# Example",
+        "## Boundaries",
+        "# Tool policy",
+        "# Research protocol",
+        "# Before you answer",
+    ):
+        assert marker not in prompt
+
+
+def test_v2_min_output_contract_uses_the_citation_format() -> None:
+    prompt = SYSTEM_PROMPTS["v2-min"]
+
+    assert "[1](#source-1)" in prompt
+    assert '<a id="source-1">' in prompt
+    assert "## Sources" in prompt
+
+
+def test_v2_min_fills_in_date_and_budget() -> None:
+    prompt = build_system_prompt("v2-min", max_iterations=6, today=date(2026, 7, 26))
+
+    assert "Today is 2026-07-26." in prompt
+    assert "6 reasoning steps" in prompt
+    assert "{today}" not in prompt
+    assert "{max_iterations}" not in prompt
+
+
 def test_get_system_prompt_returns_the_registered_text() -> None:
     assert get_system_prompt("v1") is SYSTEM_PROMPTS["v1"]
 
