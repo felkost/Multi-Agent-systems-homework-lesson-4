@@ -11,6 +11,7 @@ returns, belong in that ``description`` and not in the system prompt.
 
 import re
 import time
+from datetime import datetime
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypedDict
@@ -283,6 +284,19 @@ READ_URL_SCHEMA: dict[str, Any] = {
 }
 
 
+def _timestamp() -> str:
+    """Current local time as a filename-safe suffix.
+
+    Notes
+    -----
+    A separate function so tests can freeze it with ``monkeypatch`` — the
+    same pattern ``load_settings`` uses. Naive local time: this is a
+    single-user CLI on one machine, and the suffix only has to be readable
+    and unique, not timezone-aware.
+    """
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
 def write_report(filename: str, content: str) -> str:
     """Save a completed Markdown research report.
 
@@ -329,7 +343,10 @@ def write_report(filename: str, content: str) -> str:
         output_directory = Path(settings.output_dir).resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
 
-        report_path = (output_directory / f"{safe_stem}.md").resolve()
+        # The timestamp suffix means two saves in the same run, or a rerun of
+        # the same question, never collide -- the model only supplies a
+        # topic slug, never a full filename.
+        report_path = (output_directory / f"{safe_stem}_{_timestamp()}.md").resolve()
         if report_path.parent != output_directory:
             return "ERROR: Report path is outside the output directory."
 
