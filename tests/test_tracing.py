@@ -7,31 +7,18 @@ it first.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from langsmith.client import Client
 from langsmith.run_helpers import get_current_run_tree, tracing_context
-from langsmith.utils import get_env_var
+from langsmith.utils import get_env_var, tracing_is_enabled
 
 import agent as agent_module
 import tools
 from agent import ResearchAgent, ToolStep, build_client, configure_tracing
 from config import PROMPT_VERSION, Settings
 from fakes import ScriptedChatClient, ScriptedTurn
-
-
-@pytest.fixture(autouse=True)
-def clear_langsmith_env_cache() -> None:
-    """Drop the SDK's cached environment lookups before every test.
-
-    ``langsmith.utils.get_env_var`` is ``lru_cache``d, so one test's
-    ``LANGSMITH_TRACING`` would otherwise decide what the next test sees --
-    and a stale ``true`` would send a later test looking for a real endpoint.
-    The cast mirrors `agent.configure_tracing`: the runtime cache attributes
-    are invisible on an overloaded def.
-    """
-    cast(Any, get_env_var).cache_clear()
 
 
 def _settings(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> Settings:
@@ -84,14 +71,54 @@ def test_tracing_without_a_key_stays_off(monkeypatch: pytest.MonkeyPatch) -> Non
     assert get_env_var("TRACING") == "false"
 
 
-def test_settings_override_a_stray_environment_flag(
+def test_configure_tracing_follows_settings_not_the_live_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The decision comes from `Settings`, read once, not from `os.environ`.
+
+    Notes
+    -----
+    `Settings` itself does take the environment ahead of ``.env``, which is
+    how a single run is switched from the shell; what this pins is that
+    nothing can move the decision *after* the configuration was resolved.
+    """
     settings = _settings(monkeypatch, LANGSMITH_TRACING="false")
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
 
     assert configure_tracing(settings) is False
     assert get_env_var("TRACING") == "false"
+
+
+def test_a_leftover_langchain_flag_cannot_keep_tracing_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`LANGCHAIN_TRACING_V2` outranks `LANGSMITH_TRACING` inside the SDK.
+
+    Notes
+    -----
+    A machine that ever ran a LangChain project still exports it, and
+    writing only `LANGSMITH_TRACING` left it winning -- the agent went on
+    tracing after this function had returned ``False``.
+    """
+    settings = _settings(monkeypatch)
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+
+    assert configure_tracing(settings) is False
+    assert tracing_is_enabled() is False
+
+
+def test_a_leftover_langchain_flag_cannot_keep_tracing_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(
+        monkeypatch,
+        LANGSMITH_TRACING="true",
+        LANGSMITH_API_KEY="lsv2_pt_test",
+    )
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+
+    assert configure_tracing(settings) is True
+    assert tracing_is_enabled() is True
 
 
 def test_build_client_wraps_only_when_tracing_is_on(
