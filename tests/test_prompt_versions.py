@@ -10,7 +10,13 @@ from datetime import date
 import pytest
 
 from agent import ResearchAgent
-from config import SYSTEM_PROMPTS, Settings, build_system_prompt, get_system_prompt
+from config import (
+    SYSTEM_PROMPT_V2_MIN,
+    SYSTEM_PROMPTS,
+    Settings,
+    build_system_prompt,
+    get_system_prompt,
+)
 
 from fakes import ScriptedChatClient, ScriptedTurn
 
@@ -56,6 +62,33 @@ def test_v2_min_fills_in_date_and_budget() -> None:
     assert "6 reasoning steps" in prompt
     assert "{today}" not in prompt
     assert "{max_iterations}" not in prompt
+
+
+def test_v2_few_extends_v2_min_with_an_example() -> None:
+    prompt = SYSTEM_PROMPTS["v2-few"]
+
+    assert prompt.startswith(SYSTEM_PROMPT_V2_MIN)
+    assert "# Example" in prompt
+
+
+def test_v2_few_has_no_full_rung_sections() -> None:
+    prompt = SYSTEM_PROMPTS["v2-few"]
+
+    for marker in (
+        "## Boundaries",
+        "# Tool policy",
+        "# Research protocol",
+        "# Before you answer",
+    ):
+        assert marker not in prompt
+
+
+def test_v2_few_example_shows_one_search_per_subquestion() -> None:
+    prompt = SYSTEM_PROMPTS["v2-few"]
+
+    assert prompt.count("web_search(") == 2
+    assert prompt.count("read_url(") == 2
+    assert prompt.count("write_report(") == 1
 
 
 def test_get_system_prompt_returns_the_registered_text() -> None:

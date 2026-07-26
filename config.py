@@ -172,11 +172,33 @@ entry, and every Sources entry is cited at least once."""
 # format, no example, no explicit boundaries or protocol yet.
 SYSTEM_PROMPT_V2_MIN = "\n\n".join([_V2_ROLE, _V2_CORE_RULES, _V2_OUTPUT_CONTRACT])
 
+# One example, one topic, one trajectory. Plan L.4: a second example of the
+# same shape would create majority-label bias -- the model starts copying
+# the RAG topic itself instead of the tool-call pattern the example teaches.
+_V2_EXAMPLE = """# Example
+
+A good sequence for "Compare naive RAG and sentence-window retrieval":
+
+    web_search("naive RAG pipeline explained")
+    web_search("sentence window retrieval RAG tradeoffs")
+    read_url("<best result from the first search>")
+    read_url("<best result from the second search>")
+    write_report("rag_comparison.md", "# RAG Comparison\\n\\n## Summary\\n...")
+
+One search per sub-question, read the sources, save once."""
+
+# v2-few: v2-min plus a worked example of the tool-call trajectory --
+# few-shot as a "mini unit test" of the expected sequence (plan L.2).
+SYSTEM_PROMPT_V2_FEW = "\n\n".join(
+    [_V2_ROLE, _V2_CORE_RULES, _V2_OUTPUT_CONTRACT, _V2_EXAMPLE]
+)
+
 # Kept verbatim as the baseline stage 8 measures v2 against, not as a
 # fallback: nothing selects a version except Settings.prompt_version.
 SYSTEM_PROMPTS: dict[str, str] = {
     "v1": SYSTEM_PROMPT_V1,
     "v2-min": SYSTEM_PROMPT_V2_MIN,
+    "v2-few": SYSTEM_PROMPT_V2_FEW,
 }
 
 
