@@ -291,9 +291,10 @@ def react_step(
     state : RunState
         Updated in place by the tool calls of this step.
     force_write_report : bool, optional
-        Requested by the caller on the last iteration. Only takes effect when
-        no report has been saved yet: forcing it again after a successful
-        save would loop the model into writing forever.
+        Requested by the caller on the last iteration. Takes effect only when
+        no report has been saved yet and at least one source was read: forcing
+        it after a successful save would loop the model into writing forever,
+        and forcing it with no evidence makes the model invent its sources.
 
     Returns
     -------
@@ -307,7 +308,14 @@ def react_step(
     request in which a ``tool_call_id`` has no assistant message announcing
     it, so this ordering is part of the protocol, not bookkeeping.
     """
-    force = force_write_report and state.saved_report_path is None
+    force = (
+        force_write_report
+        and state.saved_report_path is None
+        # A forced write with nothing read produces a complete-looking report
+        # whose sources no tool ever returned -- observed directly in the K.3
+        # max_iterations=1 experiment, not hypothesised.
+        and state.successful_reads > 0
+    )
     # The nudge is a request-only addition: request_messages carries it to
     # the API, but `updated` (the persisted history) is built from the
     # original `messages` a few lines down, so the next question never sees
