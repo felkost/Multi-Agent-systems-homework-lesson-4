@@ -178,7 +178,13 @@ def main() -> None:
     if notice is not None:
         print(notice)
 
-    agent = ResearchAgent(settings)
+    try:
+        agent = ResearchAgent(settings)
+    except ValueError as error:
+        # Only get_system_prompt raises this here, and its message already
+        # lists the versions that do exist.
+        print(f"Configuration error: {error}")
+        return
 
     while True:
         try:

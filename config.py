@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,6 +14,9 @@ class Settings(BaseSettings):
 
     api_key: SecretStr = Field(validation_alias="OPENAI_API_KEY")
     model_name: str = Field(default="gpt-4o-mini", validation_alias="MODEL_NAME")
+    # Names an entry of SYSTEM_PROMPTS. It rides in every trace's metadata,
+    # which is how stage 8 tells a v1 experiment from a v2 one.
+    prompt_version: str = "v1"
 
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
@@ -69,12 +74,8 @@ def load_settings() -> Settings:
 ERROR_PREFIX = "ERROR: "
 REPORT_SAVED_PREFIX = "Report saved to: "
 
-# Recorded on every traced run so stage 8 can compare prompt revisions in
-# LangSmith instead of guessing which run used which text.
-PROMPT_VERSION = "v1"
 
-
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT_V1 = """
 You are a research agent. Your task is to investigate the
 user's question and produce a structured Markdown report.
 
@@ -123,6 +124,74 @@ Do not reveal private chain-of-thought and do not produce
 Thought: sections. Use tools directly and provide only the
 final answer and observable tool activity.
 """
+
+# Kept verbatim as the baseline stage 8 measures v2 against, not as a
+# fallback: nothing selects a version except Settings.prompt_version.
+SYSTEM_PROMPTS: dict[str, str] = {"v1": SYSTEM_PROMPT_V1}
+
+
+def get_system_prompt(version: str) -> str:
+    """Return the raw prompt template registered under `version`.
+
+    Parameters
+    ----------
+    version : str
+        Key of `SYSTEM_PROMPTS`.
+
+    Returns
+    -------
+    str
+        The template, placeholders still unfilled.
+
+    Raises
+    ------
+    ValueError
+        If no such version is registered. Loud on purpose: a typo in
+        PROMPT_VERSION would otherwise run v1 inside an experiment named
+        after v2, and stage 8 would be measuring noise.
+    """
+    try:
+        return SYSTEM_PROMPTS[version]
+    except KeyError:
+        raise ValueError(
+            f"Unknown prompt version '{version}'. "
+            f"Available: {', '.join(sorted(SYSTEM_PROMPTS))}."
+        ) from None
+
+
+def build_system_prompt(
+    version: str,
+    max_iterations: int,
+    today: date | None = None,
+) -> str:
+    """Render the system prompt for one session.
+
+    Parameters
+    ----------
+    version : str
+        Key of `SYSTEM_PROMPTS`.
+    max_iterations : int
+        Tool-call budget, told to the model up front rather than sprung on
+        it at the last iteration.
+    today : datetime.date, optional
+        Date to inject; defaults to the current date. Without it the model
+        reads "latest" as its own training cutoff (plan E.2).
+
+    Returns
+    -------
+    str
+        Prompt text with every placeholder filled in.
+
+    Notes
+    -----
+    `str.format` ignores keywords a template never mentions, so a version
+    that needs no date costs nothing here.
+    """
+    return get_system_prompt(version).format(
+        max_iterations=max_iterations,
+        today=(today or date.today()).isoformat(),
+    )
+
 
 # Sent only as the last message of the final request, never appended to
 # self._messages: a reminder that belongs to one turn's budget, not to the
