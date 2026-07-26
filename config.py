@@ -119,3 +119,12 @@ BUDGET_NUDGE_MESSAGE: dict[str, str] = {
         "evidence already gathered."
     ),
 }
+
+
+# Sent as a one-off user message when the loop ended with sources read but
+# no write_report attempt at all. Never appended to self._messages -- like
+# BUDGET_NUDGE_MESSAGE, it belongs to one turn's fallback, not to history.
+FALLBACK_REPORT_REQUEST = (
+    "Your research budget is finished. Write the final report now, using "
+    "only the sources you already read. Do not add commentary or apologies."
+)
