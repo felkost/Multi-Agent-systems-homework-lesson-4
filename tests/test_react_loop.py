@@ -403,7 +403,9 @@ def test_last_iteration_forces_write_report(
     client = ScriptedChatClient(
         [
             ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
-            ScriptedTurn(content="Best effort report."),
+            ScriptedTurn(
+                tool_calls=[("write_report", {"filename": "r", "content": "# R\n"})]
+            ),
         ]
     )
     agent = ResearchAgent(configured_settings, client=client)
@@ -425,7 +427,9 @@ def test_budget_nudge_not_persisted_in_history(
     client = ScriptedChatClient(
         [
             ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
-            ScriptedTurn(content="Best effort report."),
+            ScriptedTurn(
+                tool_calls=[("write_report", {"filename": "r", "content": "# R\n"})]
+            ),
         ]
     )
     agent = ResearchAgent(configured_settings, client=client)
