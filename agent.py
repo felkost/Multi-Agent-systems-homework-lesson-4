@@ -8,7 +8,7 @@ checkpointer, no graph, no framework state.
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from openai import BadRequestError, OpenAI
 from openai.types.chat import (
@@ -102,7 +102,7 @@ class RunState:
     """What one turn accumulated while its tools ran."""
 
     tool_calls_made: int = 0
-    successful_reads: int = 0
+    read_urls: list[str] = field(default_factory=list)
     consecutive_tool_errors: int = 0
     # Keyed on the raw query string. Lives only as long as this RunState (one
     # run()); a repeat of the same phrase in a later question is not a cache
@@ -111,6 +111,35 @@ class RunState:
     last_report_markdown: str | None = None
     last_report_filename: str | None = None
     saved_report_path: str | None = None
+
+    @property
+    def successful_reads(self) -> int:
+        """How many `read_url` calls returned a page during this turn."""
+        return len(self.read_urls)
+
+
+@dataclass(slots=True)
+class SessionState:
+    """What the session accumulated, one `RunState` per finished turn.
+
+    Notes
+    -----
+    Without it a turn's business state dies with its `RunState` while the
+    messages live on, so "what have you already read?" has two answers that
+    drift apart (12-factor #5, plan H.3).
+    """
+
+    runs: list[RunState] = field(default_factory=list)
+
+    @property
+    def all_read_urls(self) -> set[str]:
+        """Every URL read successfully so far, deduplicated."""
+        return {url for run in self.runs for url in run.read_urls}
+
+    @property
+    def all_saved_reports(self) -> list[str]:
+        """Paths of the reports saved so far, oldest first."""
+        return [run.saved_report_path for run in self.runs if run.saved_report_path]
 
 
 @dataclass(slots=True)
@@ -177,6 +206,110 @@ def _assistant_message_to_dict(message: ChatCompletionMessage) -> dict[str, Any]
             for tool_call in function_calls
         ]
     return payload
+
+
+def _summarize_tool_result(name: str, arguments: dict[str, Any], content: str) -> str:
+    """Describe a tool result in one line, without its payload."""
+    if content.startswith(ERROR_PREFIX):
+        # Already one short line, and the model still needs to know that this
+        # source failed: shrinking it would drop the reason, not the bulk.
+        return content
+    if name == "web_search":
+        try:
+            count = len(json.loads(content))
+        except (json.JSONDecodeError, TypeError):
+            count = 0
+        query = arguments.get("query", "")
+        return f'[web_search: {count} results for "{query}", payload dropped]'
+    if name == "read_url":
+        url = arguments.get("url", "")
+        return f"[read_url: {url} ({len(content)} chars), payload dropped]"
+    if name == "write_report":
+        return f"[write_report: saved to {content.removeprefix(REPORT_SAVED_PREFIX)}]"
+    return f"[{name}: {len(content)} chars, payload dropped]"
+
+
+def compact_history(messages: Messages, keep_recent: int) -> Messages:
+    """Replace the payloads of older tool results with one-line summaries.
+
+    Parameters
+    ----------
+    messages : list of dict
+        Conversation so far. Not mutated.
+    keep_recent : int
+        How many of the most recent tool results keep their full payload.
+
+    Returns
+    -------
+    list of dict
+        New list of the same shape: same messages in the same order, with only
+        the ``content`` of stale tool results replaced.
+
+    Notes
+    -----
+    Deleting a stale message instead would leave an assistant ``tool_call``
+    without its answer, and the next request would fail with HTTP 400
+    (invariant A.2). What survives compaction is the fact of the call, its
+    arguments and its outcome, so the agent still knows what it has already
+    searched and read; only the raw page text is dropped.
+
+    Examples
+    --------
+    >>> messages = [
+    ...     {
+    ...         "role": "assistant",
+    ...         "content": None,
+    ...         "tool_calls": [
+    ...             {
+    ...                 "id": "call_1",
+    ...                 "type": "function",
+    ...                 "function": {
+    ...                     "name": "read_url",
+    ...                     "arguments": '{"url": "https://example.com"}',
+    ...                 },
+    ...             }
+    ...         ],
+    ...     },
+    ...     {"role": "tool", "tool_call_id": "call_1", "content": "Long page text"},
+    ... ]
+    >>> compact_history(messages, keep_recent=0)[1]["content"]
+    '[read_url: https://example.com (14 chars), payload dropped]'
+    """
+    calls: dict[str, tuple[str, dict[str, Any]]] = {}
+    for message in messages:
+        for tool_call in message.get("tool_calls") or []:
+            function = tool_call["function"]
+            try:
+                arguments = json.loads(function["arguments"])
+            except json.JSONDecodeError:
+                arguments = {}
+            calls[tool_call["id"]] = (
+                function["name"],
+                arguments if isinstance(arguments, dict) else {},
+            )
+
+    results = [
+        position
+        for position, message in enumerate(messages)
+        if message.get("role") == "tool"
+    ]
+    # Sliced by count rather than [:-keep_recent], which silently keeps
+    # everything when keep_recent is 0.
+    stale = set(results[: len(results) - keep_recent])
+
+    compacted: Messages = []
+    for position, message in enumerate(messages):
+        if position not in stale:
+            compacted.append(message)
+            continue
+        name, arguments = calls.get(message.get("tool_call_id", ""), ("tool", {}))
+        compacted.append(
+            {
+                **message,
+                "content": _summarize_tool_result(name, arguments, message["content"]),
+            }
+        )
+    return compacted
 
 
 def _record_failure(
@@ -276,7 +409,7 @@ def _execute_tool_call(
     if name == "web_search" and ok and isinstance(arguments.get("query"), str):
         state.search_cache[arguments["query"]] = content
     if name == "read_url" and ok:
-        state.successful_reads += 1
+        state.read_urls.append(str(arguments["url"]))
     if name == "write_report" and content.startswith(REPORT_SAVED_PREFIX):
         state.saved_report_path = content.removeprefix(REPORT_SAVED_PREFIX).strip()
 
@@ -290,6 +423,7 @@ def react_step(
     state: RunState,
     *,
     force_write_report: bool = False,
+    on_step: Callable[[ToolStep], None] | None = None,
 ) -> StepResult:
     """Call the model once and run whatever tools it asked for.
 
@@ -309,6 +443,10 @@ def react_step(
         no report has been saved yet and at least one source was read: forcing
         it after a successful save would loop the model into writing forever,
         and forcing it with no evidence makes the model invent its sources.
+    on_step : callable, optional
+        Called once per executed tool call, immediately after it finishes --
+        the hook the CLI uses to print a step while the turn is still running,
+        instead of waiting for the whole turn to end.
 
     Returns
     -------
@@ -366,6 +504,8 @@ def react_step(
     for tool_call in message.tool_calls:
         step = _execute_tool_call(tool_call, state)
         steps.append(step)
+        if on_step is not None:
+            on_step(step)
         updated.append(
             {
                 "role": "tool",
@@ -507,19 +647,33 @@ class ResearchAgent:
         self._client: LLMClient = client
         system_prompt = SYSTEM_PROMPT.format(max_iterations=settings.max_iterations)
         self._messages: Messages = [{"role": "system", "content": system_prompt}]
+        self._session = SessionState()
 
     @property
     def messages(self) -> Messages:
         """Conversation history of the whole session, oldest message first."""
         return self._messages
 
-    def run(self, user_input: str) -> AgentResult:
+    @property
+    def session(self) -> SessionState:
+        """Sources read and reports saved, accumulated over every turn."""
+        return self._session
+
+    def run(
+        self,
+        user_input: str,
+        on_step: Callable[[ToolStep], None] | None = None,
+    ) -> AgentResult:
         """Answer one question, calling tools until the model stops asking.
 
         Parameters
         ----------
         user_input : str
             The user's question.
+        on_step : callable, optional
+            Called once per executed tool call, as soon as it finishes, so a
+            caller such as the CLI can print progress during the turn instead
+            of only after ``run`` returns.
 
         Returns
         -------
@@ -528,7 +682,11 @@ class ResearchAgent:
         """
         state = RunState()
         steps: list[ToolStep] = []
-        pending: Messages = [*self._messages, {"role": "user", "content": user_input}]
+        # Compacted here and not inside the loop: within one question the pages
+        # just read are the evidence the model is reasoning over, and only a
+        # finished turn's payloads have earned their summary (plan H.6).
+        history = compact_history(self._messages, self._settings.compact_keep_recent)
+        pending: Messages = [*history, {"role": "user", "content": user_input}]
         max_iterations = self._settings.max_iterations
 
         step = react_step(
@@ -537,6 +695,7 @@ class ResearchAgent:
             self._settings,
             state,
             force_write_report=max_iterations == 1,
+            on_step=on_step,
         )
         steps.extend(step.steps)
         iteration = 1
@@ -549,6 +708,7 @@ class ResearchAgent:
                 self._settings,
                 state,
                 force_write_report=iteration == max_iterations,
+                on_step=on_step,
             )
             steps.extend(step.steps)
 
@@ -556,7 +716,12 @@ class ResearchAgent:
         # otherwise leave a tool_call_id without its tool result, and every
         # later request would fail with HTTP 400.
         self._messages = step.messages
-        return self._finish(step, steps, state, iteration, user_input)
+        result = self._finish(step, steps, state, iteration, user_input)
+        # The completion gate can still save a report after the loop ended, so
+        # the turn's own record is only complete once _finish has run.
+        state.saved_report_path = result.saved_report_path
+        self._session.runs.append(state)
+        return result
 
     def _finish(
         self,
