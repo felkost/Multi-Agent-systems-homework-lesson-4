@@ -8,7 +8,7 @@ checkpointer, no graph, no framework state.
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from openai import BadRequestError, OpenAI
 from openai.types.chat import (
@@ -423,6 +423,7 @@ def react_step(
     state: RunState,
     *,
     force_write_report: bool = False,
+    on_step: Callable[[ToolStep], None] | None = None,
 ) -> StepResult:
     """Call the model once and run whatever tools it asked for.
 
@@ -442,6 +443,10 @@ def react_step(
         no report has been saved yet and at least one source was read: forcing
         it after a successful save would loop the model into writing forever,
         and forcing it with no evidence makes the model invent its sources.
+    on_step : callable, optional
+        Called once per executed tool call, immediately after it finishes --
+        the hook the CLI uses to print a step while the turn is still running,
+        instead of waiting for the whole turn to end.
 
     Returns
     -------
@@ -499,6 +504,8 @@ def react_step(
     for tool_call in message.tool_calls:
         step = _execute_tool_call(tool_call, state)
         steps.append(step)
+        if on_step is not None:
+            on_step(step)
         updated.append(
             {
                 "role": "tool",
@@ -652,13 +659,21 @@ class ResearchAgent:
         """Sources read and reports saved, accumulated over every turn."""
         return self._session
 
-    def run(self, user_input: str) -> AgentResult:
+    def run(
+        self,
+        user_input: str,
+        on_step: Callable[[ToolStep], None] | None = None,
+    ) -> AgentResult:
         """Answer one question, calling tools until the model stops asking.
 
         Parameters
         ----------
         user_input : str
             The user's question.
+        on_step : callable, optional
+            Called once per executed tool call, as soon as it finishes, so a
+            caller such as the CLI can print progress during the turn instead
+            of only after ``run`` returns.
 
         Returns
         -------
@@ -680,6 +695,7 @@ class ResearchAgent:
             self._settings,
             state,
             force_write_report=max_iterations == 1,
+            on_step=on_step,
         )
         steps.extend(step.steps)
         iteration = 1
@@ -692,6 +708,7 @@ class ResearchAgent:
                 self._settings,
                 state,
                 force_write_report=iteration == max_iterations,
+                on_step=on_step,
             )
             steps.extend(step.steps)
 

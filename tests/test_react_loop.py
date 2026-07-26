@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, Mock
 import pytest
 
 import tools
-from agent import ResearchAgent, RunState, react_step
+from agent import ResearchAgent, RunState, ToolStep, react_step
 from config import BUDGET_NUDGE_MESSAGE, Settings
 
 from fakes import ScriptedChatClient, ScriptedTurn
@@ -113,6 +113,94 @@ def test_parallel_tool_calls_all_executed(
     assert client.requests[0]["parallel_tool_calls"] is True
 
 
+def test_on_step_is_called_for_every_tool_call_across_iterations(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_search(monkeypatch)
+    _patch_read_url(monkeypatch)
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com/one"})]),
+            ScriptedTurn(
+                tool_calls=[("write_report", {"filename": "rag", "content": "# RAG"})]
+            ),
+            ScriptedTurn(content="Done."),
+        ],
+    )
+    seen: list[str] = []
+
+    agent.run("What is RAG?", on_step=lambda step: seen.append(step.name))
+
+    assert seen == ["web_search", "read_url", "write_report"]
+
+
+def test_on_step_receives_the_executed_step(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_search(monkeypatch)
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(content="Done."),
+        ],
+    )
+    reported: list[ToolStep] = []
+
+    agent.run("What is RAG?", on_step=reported.append)
+
+    assert len(reported) == 1
+    assert reported[0].name == "web_search"
+    assert reported[0].arguments == {"query": "RAG"}
+    assert reported[0].ok is True
+
+
+def test_on_step_fires_before_the_next_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_search(monkeypatch)
+    agent, client = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(content="Done."),
+        ],
+    )
+    requests_seen_by_callback: list[int] = []
+
+    agent.run(
+        "What is RAG?",
+        on_step=lambda step: requests_seen_by_callback.append(len(client.requests)),
+    )
+
+    # Exactly one request had been sent when the callback fired: the second
+    # model call (the one that produced "Done.") had not gone out yet.
+    assert requests_seen_by_callback == [1]
+
+
+def test_run_without_on_step_is_unaffected(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_search(monkeypatch)
+    agent, _ = _agent(
+        configured_settings,
+        [
+            ScriptedTurn(tool_calls=[("web_search", {"query": "RAG"})]),
+            ScriptedTurn(content="Done."),
+        ],
+    )
+
+    result = agent.run("What is RAG?")
+
+    assert result.final_answer == "Done."
+
+
 def test_system_prompt_is_first_message(configured_settings: Settings) -> None:
     agent, _ = _agent(configured_settings, [ScriptedTurn(content="Answer.")])
 
@@ -189,6 +277,31 @@ def test_search_results_are_serialized_as_readable_json(
     tool_message = agent.messages[3]
     assert isinstance(tool_message["content"], str)
     assert "Пошук по-українськи" in tool_message["content"]
+
+
+def test_react_step_forwards_each_tool_step_to_on_step(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_search(monkeypatch)
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ("web_search", {"query": "angle a"}),
+                    ("web_search", {"query": "angle b"}),
+                ]
+            )
+        ]
+    )
+    messages: list[dict[str, Any]] = [{"role": "user", "content": "A question."}]
+    reported: list[ToolStep] = []
+
+    react_step(
+        messages, client, configured_settings, RunState(), on_step=reported.append
+    )
+
+    assert [step.arguments["query"] for step in reported] == ["angle a", "angle b"]
 
 
 def test_react_step_does_not_mutate_input_messages(
