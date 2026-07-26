@@ -169,6 +169,22 @@ def test_repl_settings_error_exits_before_the_loop(
     assert "Configuration error" in capsys.readouterr().out
 
 
+def test_repl_unknown_prompt_version_exits_before_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = configured_settings.model_copy(update={"prompt_version": "v9"})
+    monkeypatch.setattr(main, "load_settings", lambda: settings)
+    input_spy = Mock()
+    monkeypatch.setattr("builtins.input", input_spy)
+
+    main.main()
+
+    input_spy.assert_not_called()
+    assert "Unknown prompt version 'v9'" in capsys.readouterr().out
+
+
 def test_configure_console_uses_emoji_icons_by_default() -> None:
     tool_icon, result_icon = main._configure_console()
 

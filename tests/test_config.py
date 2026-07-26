@@ -102,6 +102,28 @@ def test_tracing_key_is_not_exposed_in_repr(
     assert "lsv2_pt_never_print_this" not in representation
 
 
+def test_settings_default_prompt_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret-key")
+    monkeypatch.delenv("PROMPT_VERSION", raising=False)
+
+    settings = Settings.model_validate({})
+
+    assert settings.prompt_version == "v1"
+
+
+def test_settings_reads_prompt_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret-key")
+    monkeypatch.setenv("PROMPT_VERSION", "v2")
+
+    settings = Settings.model_validate({})
+
+    assert settings.prompt_version == "v2"
+
+
 @pytest.mark.parametrize("value", ["99999", "20000001"])
 def test_settings_rejects_out_of_range_download_size(
     monkeypatch: pytest.MonkeyPatch,

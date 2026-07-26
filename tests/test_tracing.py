@@ -17,7 +17,7 @@ from langsmith.utils import get_env_var, tracing_is_enabled
 import agent as agent_module
 import tools
 from agent import ResearchAgent, ToolStep, build_client, configure_tracing
-from config import PROMPT_VERSION, Settings
+from config import Settings
 from fakes import ScriptedChatClient, ScriptedTurn
 
 
@@ -238,7 +238,7 @@ def test_tool_spans_nest_inside_the_research_run(
     assert (tool_span.name, tool_span.run_type) == ("web_search", "tool")
     assert (root_span.name, root_span.run_type) == ("research_run", "chain")
     assert tool_span.parent_run_id == root_span.id
-    assert root_span.metadata["prompt_version"] == PROMPT_VERSION
+    assert root_span.metadata["prompt_version"] == configured_settings.prompt_version
     assert root_span.metadata["model"] == configured_settings.model_name
     assert root_span.metadata["max_iterations"] == configured_settings.max_iterations
 

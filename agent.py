@@ -27,10 +27,9 @@ from config import (
     BUDGET_NUDGE_MESSAGE,
     ERROR_PREFIX,
     FALLBACK_REPORT_REQUEST,
-    PROMPT_VERSION,
     REPORT_SAVED_PREFIX,
-    SYSTEM_PROMPT,
     Settings,
+    build_system_prompt,
 )
 from tools import TOOL_REGISTRY, TOOL_SCHEMAS, write_report
 
@@ -737,7 +736,9 @@ class ResearchAgent:
         # later call through self._client is then checked against the SDK's
         # own strict overloads instead of this Protocol.
         self._client: LLMClient = client
-        system_prompt = SYSTEM_PROMPT.format(max_iterations=settings.max_iterations)
+        system_prompt = build_system_prompt(
+            settings.prompt_version, settings.max_iterations
+        )
         self._messages: Messages = [{"role": "system", "content": system_prompt}]
         self._session = SessionState()
 
@@ -787,7 +788,7 @@ class ResearchAgent:
                 {
                     "model": self._settings.model_name,
                     "max_iterations": self._settings.max_iterations,
-                    "prompt_version": PROMPT_VERSION,
+                    "prompt_version": self._settings.prompt_version,
                 }
             )
 
