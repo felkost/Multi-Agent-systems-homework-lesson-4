@@ -6,6 +6,7 @@ checkpointer, no graph, no framework state.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -23,7 +24,7 @@ from config import (
     SYSTEM_PROMPT,
     Settings,
 )
-from tools import TOOL_REGISTRY, TOOL_SCHEMAS
+from tools import TOOL_REGISTRY, TOOL_SCHEMAS, write_report
 
 Messages = list[dict[str, Any]]
 
@@ -366,6 +367,30 @@ def react_step(
     return StepResult(updated, steps, None, None)
 
 
+def _build_report_filename(question: str) -> str:
+    """Build a fallback report filename from the user's question.
+
+    Parameters
+    ----------
+    question : str
+        The user's question for this turn.
+
+    Returns
+    -------
+    str
+        A slug derived from the question, without a directory or extension.
+        ``write_report`` sanitizes and timestamps it further, so this name
+        only has to be descriptive, not unique or already safe.
+
+    Examples
+    --------
+    >>> _build_report_filename("What is RAG?")
+    'research_what_is_rag'
+    """
+    slug = re.sub(r"[^\w]+", "_", question.lower(), flags=re.UNICODE).strip("_")
+    return f"research_{slug[:60] or 'report'}"
+
+
 class ResearchAgent:
     """Research agent that runs its own ReAct loop.
 
@@ -439,7 +464,7 @@ class ResearchAgent:
         # otherwise leave a tool_call_id without its tool result, and every
         # later request would fail with HTTP 400.
         self._messages = step.messages
-        return self._finish(step, steps, state, iteration)
+        return self._finish(step, steps, state, iteration, user_input)
 
     def _finish(
         self,
@@ -447,10 +472,11 @@ class ResearchAgent:
         steps: list[ToolStep],
         state: RunState,
         iterations_used: int,
+        question: str,
     ) -> AgentResult:
         """Assemble the result of a finished turn."""
         stop_reason: StopReason = step.stop_reason or "iteration_limit"
-        saved_report_path, report_source = self._ensure_report_saved(state)
+        saved_report_path, report_source = self._ensure_report_saved(state, question)
         return AgentResult(
             final_answer=step.final_answer,
             steps=steps,
@@ -461,13 +487,17 @@ class ResearchAgent:
             report_source=report_source,
         )
 
-    def _ensure_report_saved(self, state: RunState) -> tuple[str | None, ReportSource]:
+    def _ensure_report_saved(
+        self, state: RunState, question: str
+    ) -> tuple[str | None, ReportSource]:
         """Decide what report this turn produced, once the loop has ended.
 
         Parameters
         ----------
         state : RunState
             What the turn's tool calls accumulated.
+        question : str
+            The user's question, used to name a fallback report file.
 
         Returns
         -------
@@ -476,12 +506,34 @@ class ResearchAgent:
 
         Notes
         -----
-        The guarantee lives here, in Python after the loop, rather than in the
-        system prompt: an instruction the model is asked to follow is not
-        something the code can rely on. This step implements only the case
-        where the model saved the report itself; the fallback paths arrive in
-        the steps that follow.
+        The guarantee lives here, in Python after the loop, rather than in
+        the system prompt: an instruction the model is asked to follow is
+        not something the code can rely on.
+
+        A turn with no successful read and no attempted report is treated as
+        a non-research turn (e.g. "where did you save it?"): a report with
+        no evidence behind it has no value, and writing one on every reply
+        would litter `output/` with noise.
+
+        When the model attempted `write_report` but the call failed, this
+        retries with the same markdown under a filename built from the
+        question, deliberately not the model's own filename: reusing it
+        would repeat the exact failure whenever the name itself was the
+        problem, as happened during this stage's own K.3 probe, where a
+        forced write reused a name that collided with an existing report.
         """
         if state.saved_report_path is not None:
             return state.saved_report_path, "tool"
+        if state.successful_reads == 0 and state.last_report_markdown is None:
+            return None, "none"
+
+        markdown = state.last_report_markdown
+        if markdown is None or not markdown.strip():
+            return None, "none"
+
+        result = write_report(
+            filename=_build_report_filename(question), content=markdown
+        )
+        if result.startswith(REPORT_SAVED_PREFIX):
+            return result.removeprefix(REPORT_SAVED_PREFIX).strip(), "fallback"
         return None, "none"
