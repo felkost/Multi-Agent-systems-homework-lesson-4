@@ -69,6 +69,10 @@ def load_settings() -> Settings:
 ERROR_PREFIX = "ERROR: "
 REPORT_SAVED_PREFIX = "Report saved to: "
 
+# Recorded on every traced run so stage 8 can compare prompt revisions in
+# LangSmith instead of guessing which run used which text.
+PROMPT_VERSION = "v1"
+
 
 SYSTEM_PROMPT = """
 You are a research agent. Your task is to investigate the
