@@ -130,3 +130,15 @@ def test_format_tool_result_never_leaks_full_page_text() -> None:
     )
 
     assert secret not in format_tool_result(step)
+
+
+def test_format_tool_call_accepts_an_ascii_icon() -> None:
+    step = ToolStep(name="web_search", arguments={"query": "RAG"}, result="[]", ok=True)
+
+    assert format_tool_call(step, "[tool]").startswith("[tool] Tool call:")
+
+
+def test_format_tool_result_accepts_an_ascii_icon() -> None:
+    step = ToolStep(name="web_search", arguments={"query": "RAG"}, result="[]", ok=True)
+
+    assert format_tool_result(step, "[result]").startswith("[result] Result:")

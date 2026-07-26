@@ -1,15 +1,22 @@
+import io
 import json
-from typing import Any
+import sys
+from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from openai import APIError, OpenAIError
 from pydantic import ValidationError
 
-from agent import ResearchAgent, ToolStep
+from agent import ResearchAgent, SessionState, ToolStep
 from config import load_settings
 
 _MAX_ARGUMENT_LENGTH = 80
 _MAX_RESULT_PREVIEW = 60
+
+_TOOL_CALL_ICON = "🔧"
+_RESULT_ICON = "📎"
+_ASCII_TOOL_CALL_ICON = "[tool]"
+_ASCII_RESULT_ICON = "[result]"
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -37,16 +44,16 @@ def _format_argument(key: str, value: Any) -> str:
     return f'{key}="{_truncate(text, _MAX_ARGUMENT_LENGTH)}"'
 
 
-def format_tool_call(step: ToolStep) -> str:
-    """Render the `🔧 Tool call: ...` line for one executed step."""
+def format_tool_call(step: ToolStep, icon: str = _TOOL_CALL_ICON) -> str:
+    """Render the tool-call log line (`🔧 Tool call: ...` by default)."""
     arguments = ", ".join(
         _format_argument(key, value) for key, value in step.arguments.items()
     )
-    return f"🔧 Tool call: {step.name}({arguments})"
+    return f"{icon} Tool call: {step.name}({arguments})"
 
 
-def format_tool_result(step: ToolStep) -> str:
-    """Render the `📎 Result: ...` line for one executed step.
+def format_tool_result(step: ToolStep, icon: str = _RESULT_ICON) -> str:
+    """Render the result log line (`📎 Result: ...` by default).
 
     Notes
     -----
@@ -56,23 +63,57 @@ def format_tool_result(step: ToolStep) -> str:
     """
     if not step.ok:
         # ERROR: messages are already one short, safe sentence (plan A.4).
-        return f"📎 Result: {step.result}"
+        return f"{icon} Result: {step.result}"
     if step.name == "web_search":
         try:
             count = len(json.loads(step.result))
         except (json.JSONDecodeError, TypeError):
             count = 0
-        return f"📎 Result: Found {count} results..."
+        return f"{icon} Result: Found {count} results..."
     if step.name == "write_report":
-        return f"📎 Result: {step.result}"
+        return f"{icon} Result: {step.result}"
     preview = _truncate(step.result, _MAX_RESULT_PREVIEW)
     return f"📎 Result: [{len(step.result)} chars] {preview}"
 
 
-def _log_step(step: ToolStep) -> None:
-    """Print one executed step's two log lines as soon as it finishes."""
-    print(f"\n{format_tool_call(step)}")
-    print(format_tool_result(step))
+def _configure_console() -> tuple[str, str]:
+    """Reconfigure stdout to UTF-8; fall back to ASCII log markers if it can't.
+
+    Returns
+    -------
+    tuple of (str, str)
+        Icons for the tool-call and result log lines: the emoji markers when
+        the console accepts UTF-8, plain ASCII markers otherwise.
+
+    Notes
+    -----
+    A Windows console still on a legacy code page (cp1251/cp866) raises
+    `UnicodeEncodeError` the moment `print` sees an emoji -- not hypothetical,
+    it broke an unrelated PDF-extraction script during this project's own
+    planning (`insights.md`).
+    """
+    try:
+        # sys.stdout is typed as the narrower `TextIO`, which has no
+        # `reconfigure`; the cast tells mypy what every real stream (and
+        # pytest's own capture object) actually is, without changing runtime
+        # behaviour -- the `except` below still fires if that trust is wrong.
+        cast(io.TextIOWrapper, sys.stdout).reconfigure(
+            encoding="utf-8", errors="replace"
+        )
+        return _TOOL_CALL_ICON, _RESULT_ICON
+    except (AttributeError, ValueError):
+        return _ASCII_TOOL_CALL_ICON, _ASCII_RESULT_ICON
+
+
+def format_session_stats(session: SessionState) -> str:
+    """Render the `:stats` summary of what the session has done so far."""
+    lines = [
+        f"Turns: {len(session.runs)}",
+        f"Sources read: {len(session.all_read_urls)}",
+        f"Reports saved: {len(session.all_saved_reports)}",
+    ]
+    lines.extend(f"  {path}" for path in session.all_saved_reports)
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -83,7 +124,13 @@ def main() -> None:
     `ResearchAgent` serves the whole session, so its message list is the
     session's memory.
     """
-    print("Research Agent (type 'exit' to quit)")
+    tool_icon, result_icon = _configure_console()
+
+    def log_step(step: ToolStep) -> None:
+        print(f"\n{format_tool_call(step, tool_icon)}")
+        print(format_tool_result(step, result_icon))
+
+    print("Research Agent (type 'exit' to quit, ':stats' for session stats)")
     print("-" * 40)
 
     try:
@@ -108,8 +155,12 @@ def main() -> None:
             print("Goodbye!")
             break
 
+        if user_input.lower() == ":stats":
+            print(format_session_stats(agent.session))
+            continue
+
         try:
-            result = agent.run(user_input, on_step=_log_step)
+            result = agent.run(user_input, on_step=log_step)
         # A failed request kills the turn, not the session: the user may want
         # to retry the same question or ask a different one. APIError comes
         # first because it is the more specific of the two.
