@@ -199,11 +199,30 @@ def test_fallback_falls_back_to_plain_text_when_parse_fails(
     assert len(client.requests) == 3
 
 
+def _citation_numbers(rendered: str) -> tuple[set[str], set[str], set[str]]:
+    """In-text references, anchors and numbered entries of a rendered report."""
+    return (
+        set(re.findall(r"\[(\d+)\]\(#source-\d+\)", rendered)),
+        set(re.findall(r'<a id="source-(\d+)"></a>', rendered)),
+        set(re.findall(r"</a>(\d+)\. \[", rendered)),
+    )
+
+
 def test_rendered_report_citations_are_consistent() -> None:
     report = ResearchReport(
         title="T",
         summary="S",
-        sections=[ReportSection(heading="H", body="B")],
+        sections=[
+            ReportSection(
+                heading="H",
+                body="B",
+                source_urls=[
+                    "https://a.example",
+                    "https://b.example",
+                    "https://c.example",
+                ],
+            )
+        ],
         limitations="L",
         sources=[
             SourceRef(url="https://a.example", title="A"),
@@ -212,11 +231,170 @@ def test_rendered_report_citations_are_consistent() -> None:
         ],
     )
 
+    in_text, anchors, numbered_entries = _citation_numbers(render_report(report))
+
+    # The in-text set is the half the stage-7 ladder found missing: the old
+    # renderer produced anchors nothing ever referenced.
+    assert in_text == anchors == numbered_entries == {"1", "2", "3"}
+
+
+def test_rendered_report_cites_the_sections_that_used_a_source() -> None:
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[
+            ReportSection(
+                heading="First", body="Claim one.", source_urls=["https://a.example"]
+            ),
+            ReportSection(
+                heading="Second", body="Claim two.", source_urls=["https://b.example"]
+            ),
+        ],
+        limitations="L",
+        sources=[
+            SourceRef(url="https://a.example", title="A"),
+            SourceRef(url="https://b.example", title="B"),
+        ],
+    )
+
     rendered = render_report(report)
 
-    anchors = set(re.findall(r'<a id="source-(\d+)"></a>', rendered))
-    numbered_entries = set(re.findall(r"</a>(\d+)\. \[", rendered))
-    assert anchors == numbered_entries == {"1", "2", "3"}
+    assert "Claim one. [1](#source-1)" in rendered
+    assert "Claim two. [2](#source-2)" in rendered
+
+
+def test_rendered_report_numbers_sources_by_first_appearance() -> None:
+    """Numbering follows the text, not the order the model listed sources in.
+
+    The prompt's own output contract says "numbered by first appearance",
+    so the renderer -- not the model -- is what makes that true.
+    """
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[
+            ReportSection(
+                heading="First",
+                body="Uses the second source.",
+                source_urls=["https://b.example"],
+            ),
+            ReportSection(
+                heading="Second",
+                body="Uses the first source.",
+                source_urls=["https://a.example"],
+            ),
+        ],
+        limitations="L",
+        sources=[
+            SourceRef(url="https://a.example", title="A"),
+            SourceRef(url="https://b.example", title="B"),
+        ],
+    )
+
+    rendered = render_report(report)
+
+    assert "Uses the second source. [1](#source-1)" in rendered
+    assert "Uses the first source. [2](#source-2)" in rendered
+    assert '<a id="source-1"></a>1. [B](https://b.example)' in rendered
+    assert '<a id="source-2"></a>2. [A](https://a.example)' in rendered
+
+
+def test_rendered_report_reuses_one_number_for_a_repeated_url() -> None:
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[
+            ReportSection(
+                heading="First", body="Claim one.", source_urls=["https://a.example"]
+            ),
+            ReportSection(
+                heading="Second",
+                body="Claim two.",
+                source_urls=["https://a.example", "https://a.example"],
+            ),
+        ],
+        limitations="L",
+        sources=[SourceRef(url="https://a.example", title="A")],
+    )
+
+    rendered = render_report(report)
+
+    assert "Claim one. [1](#source-1)" in rendered
+    assert "Claim two. [1](#source-1)" in rendered
+    assert rendered.count('<a id="source-') == 1
+
+
+def test_rendered_report_ignores_a_url_the_report_never_listed() -> None:
+    """A section may only cite sources the report itself lists.
+
+    Without this the renderer would mint an anchor for a URL that has no
+    title and, worse, no evidence that any tool ever returned it.
+    """
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[
+            ReportSection(
+                heading="H",
+                body="Claim.",
+                source_urls=["https://a.example", "https://invented.example"],
+            )
+        ],
+        limitations="L",
+        sources=[SourceRef(url="https://a.example", title="A")],
+    )
+
+    rendered = render_report(report)
+
+    in_text, anchors, _ = _citation_numbers(rendered)
+
+    assert in_text == anchors == {"1"}
+    assert "invented.example" not in rendered
+
+
+def test_rendered_report_drops_a_source_no_section_cites() -> None:
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[
+            ReportSection(heading="H", body="Claim.", source_urls=["https://a.example"])
+        ],
+        limitations="L",
+        sources=[
+            SourceRef(url="https://a.example", title="A"),
+            SourceRef(url="https://unused.example", title="Unused"),
+        ],
+    )
+
+    rendered = render_report(report)
+
+    in_text, anchors, _ = _citation_numbers(rendered)
+
+    assert in_text == anchors == {"1"}
+    assert "unused.example" not in rendered
+
+
+def test_rendered_report_without_tagged_sections_still_lists_sources() -> None:
+    """An untagged report keeps the pre-R1 rendering rather than losing its
+    sources: no in-text references are possible, but the list is still the
+    honest record of what was read."""
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[ReportSection(heading="H", body="B")],
+        limitations="L",
+        sources=[
+            SourceRef(url="https://a.example", title="A"),
+            SourceRef(url="https://b.example", title="B"),
+        ],
+    )
+
+    rendered = render_report(report)
+
+    in_text, anchors, numbered_entries = _citation_numbers(rendered)
+
+    assert in_text == set()
+    assert anchors == numbered_entries == {"1", "2"}
 
 
 def test_fallback_gives_up_when_model_returns_nothing(

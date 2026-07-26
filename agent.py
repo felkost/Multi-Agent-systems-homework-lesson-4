@@ -21,7 +21,7 @@ from openai.types.chat import (
     ChatCompletionMessage,
     ChatCompletionMessageToolCallUnion,
 )
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from config import (
     BUDGET_NUDGE_MESSAGE,
@@ -648,6 +648,17 @@ class ReportSection(BaseModel):
 
     heading: str
     body: str
+    # URLs, not numbers: a section is written before any numbering exists,
+    # which is precisely why asking the model for `[n](#source-n)` here
+    # produced reports with anchors and no references to them (stage 7).
+    source_urls: list[str] = Field(
+        default_factory=list,
+        description=(
+            "URLs of the sources this section's claims come from. Use the "
+            "URL itself, not a number: citation numbers are assigned when "
+            "the report is rendered."
+        ),
+    )
 
 
 class ResearchReport(BaseModel):
@@ -671,16 +682,36 @@ def render_report(report: ResearchReport) -> str:
     Returns
     -------
     str
-        Markdown text, with a numbered ``## Sources`` section whose anchors
-        are built entirely from list order -- the model never has to count
-        sources itself.
+        Markdown text whose in-text ``[n](#source-n)`` references, anchors
+        and ``## Sources`` numbering are all derived here, from the URLs
+        each section declared -- the model never counts anything itself.
+
+    Notes
+    -----
+    Numbering follows first appearance in the text, which is what the
+    prompt's own output contract promises; making the renderer honour it
+    is cheaper than asking the model to. Sources land in the list only
+    when a section cites them, so both halves of "every reference has an
+    entry, every entry is referenced" hold by construction -- stage 7
+    measured 16 of 17 fallback reports failing the second half, because
+    anchors were rendered from a list nothing pointed at.
+
+    A report whose sections declare no sources at all keeps the older,
+    reference-free rendering: an untagged report should still carry the
+    record of what was read.
 
     Examples
     --------
     >>> report = ResearchReport(
     ...     title="RAG vs long context",
     ...     summary="Both have trade-offs.",
-    ...     sections=[ReportSection(heading="Findings", body="RAG wins on cost.")],
+    ...     sections=[
+    ...         ReportSection(
+    ...             heading="Findings",
+    ...             body="RAG wins on cost.",
+    ...             source_urls=["https://example.com"],
+    ...         )
+    ...     ],
     ...     limitations="Only two sources were read.",
     ...     sources=[SourceRef(url="https://example.com", title="Example")],
     ... )
@@ -691,7 +722,7 @@ def render_report(report: ResearchReport) -> str:
     Both have trade-offs.
     <BLANKLINE>
     ## Findings
-    RAG wins on cost.
+    RAG wins on cost. [1](#source-1)
     <BLANKLINE>
     ## Limitations
     Only two sources were read.
@@ -699,14 +730,36 @@ def render_report(report: ResearchReport) -> str:
     ## Sources
     <a id="source-1"></a>1. [Example](https://example.com)
     """
+    titles = {source.url: source.title for source in report.sources}
+    cited: list[str] = []
+    for section in report.sections:
+        for url in section.source_urls:
+            # An unlisted URL is dropped rather than numbered: it would get
+            # an anchor with no title and no evidence a tool ever returned it.
+            if url in titles and url not in cited:
+                cited.append(url)
+    numbers = {url: index for index, url in enumerate(cited, start=1)}
+
     lines = [f"# {report.title}", "", "## Summary", report.summary]
     for section in report.sections:
-        lines += ["", f"## {section.heading}", section.body]
-    lines += ["", "## Limitations", report.limitations, "", "## Sources"]
-    for index, source in enumerate(report.sources, start=1):
-        lines.append(
-            f'<a id="source-{index}"></a>{index}. [{source.title}]({source.url})'
+        references = " ".join(
+            f"[{numbers[url]}](#source-{numbers[url]})"
+            for url in dict.fromkeys(section.source_urls)
+            if url in numbers
         )
+        body = f"{section.body} {references}" if references else section.body
+        lines += ["", f"## {section.heading}", body]
+    lines += ["", "## Limitations", report.limitations, "", "## Sources"]
+
+    if cited:
+        entries = [(numbers[url], titles[url], url) for url in cited]
+    else:
+        entries = [
+            (index, source.title, source.url)
+            for index, source in enumerate(report.sources, start=1)
+        ]
+    for index, title, url in entries:
+        lines.append(f'<a id="source-{index}"></a>{index}. [{title}]({url})')
     return "\n".join(lines)
 
 
