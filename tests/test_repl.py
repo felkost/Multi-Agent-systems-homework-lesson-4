@@ -205,3 +205,42 @@ def test_format_session_stats_lists_saved_report_paths() -> None:
     assert "Reports saved: 2" in text
     assert "output/one.md" in text
     assert "output/two.md" in text
+
+
+def test_tracing_notice_names_the_project_when_tracing_is_on(
+    configured_settings: Settings,
+) -> None:
+    notice = main.format_tracing_notice(configured_settings, True)
+
+    assert notice is not None
+    assert configured_settings.langsmith_project in notice
+
+
+def test_tracing_notice_warns_when_the_key_is_missing(
+    configured_settings: Settings,
+) -> None:
+    settings = configured_settings.model_copy(update={"langsmith_tracing": True})
+
+    notice = main.format_tracing_notice(settings, False)
+
+    assert notice is not None
+    assert "LANGSMITH_API_KEY" in notice
+
+
+def test_tracing_notice_stays_quiet_when_nobody_asked_for_tracing(
+    configured_settings: Settings,
+) -> None:
+    assert main.format_tracing_notice(configured_settings, False) is None
+
+
+def test_repl_reports_that_a_requested_trace_will_not_happen(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = configured_settings.model_copy(update={"langsmith_tracing": True})
+    monkeypatch.setattr(agent_module.ResearchAgent, "run", Mock())
+
+    _run_repl(monkeypatch, settings, ["exit"])
+
+    assert "not traced" in capsys.readouterr().out
