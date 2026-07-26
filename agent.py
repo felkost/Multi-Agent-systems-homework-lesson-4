@@ -442,12 +442,38 @@ class ResearchAgent:
     ) -> AgentResult:
         """Assemble the result of a finished turn."""
         stop_reason: StopReason = step.stop_reason or "iteration_limit"
+        saved_report_path, report_source = self._ensure_report_saved(state)
         return AgentResult(
             final_answer=step.final_answer,
             steps=steps,
             iterations_used=iterations_used,
             budget_exhausted=step.stop_reason is None,
             stop_reason=stop_reason,
-            saved_report_path=state.saved_report_path,
-            report_source="tool" if state.saved_report_path is not None else "none",
+            saved_report_path=saved_report_path,
+            report_source=report_source,
         )
+
+    def _ensure_report_saved(self, state: RunState) -> tuple[str | None, ReportSource]:
+        """Decide what report this turn produced, once the loop has ended.
+
+        Parameters
+        ----------
+        state : RunState
+            What the turn's tool calls accumulated.
+
+        Returns
+        -------
+        tuple of (str or None, ReportSource)
+            Path of the saved report, and how that file came to exist.
+
+        Notes
+        -----
+        The guarantee lives here, in Python after the loop, rather than in the
+        system prompt: an instruction the model is asked to follow is not
+        something the code can rely on. This step implements only the case
+        where the model saved the report itself; the fallback paths arrive in
+        the steps that follow.
+        """
+        if state.saved_report_path is not None:
+            return state.saved_report_path, "tool"
+        return None, "none"
