@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any, Self
-
+from types import SimpleNamespace
 from openai.types.chat import ChatCompletion
 
 
@@ -111,19 +111,34 @@ class ScriptedChatClient:
     Parameters
     ----------
     script : list of ScriptedTurn
-        Responses to return, in order.
+        Responses to return, in order, from ``create()``.
+    parsed_report : Any, optional
+        Object returned as ``.choices[0].message.parsed`` from ``parse()``.
+    parse_error : Exception, optional
+        Raised by ``parse()`` instead of returning a result, for tests that
+        exercise the fallback to ``create()``.
 
     Attributes
     ----------
     requests : list of dict
-        Every request payload the loop sent, so tests can assert on the
-        message history and on request parameters such as ``tool_choice``.
+        Every request payload sent through ``create()``.
+    parse_requests : list of dict
+        Every request payload sent through ``parse()``.
     """
 
-    def __init__(self, script: list[ScriptedTurn]) -> None:
+    def __init__(
+        self,
+        script: list[ScriptedTurn],
+        *,
+        parsed_report: Any = None,
+        parse_error: Exception | None = None,
+    ) -> None:
         self._script = script
         self._index = 0
         self.requests: list[dict[str, Any]] = []
+        self._parsed_report = parsed_report
+        self._parse_error = parse_error
+        self.parse_requests: list[dict[str, Any]] = []
 
     @property
     def chat(self) -> Self:
@@ -143,3 +158,22 @@ class ScriptedChatClient:
         turn = self._script[self._index]
         self._index += 1
         return build_completion(turn, self._index)
+
+    def parse(self, **kwargs: Any) -> Any:
+        """Return the scripted structured-output result, or raise it.
+
+        Notes
+        -----
+        A plain object with just enough shape for
+        ``ResearchAgent._request_report_markdown`` to read
+        (``.choices[0].message.parsed``), not a real ``ParsedChatCompletion``:
+        that type is a generic Pydantic model with an SDK-internal shape not
+        worth reconstructing for a fake that only ever reads this one
+        attribute path.
+        """
+        self.parse_requests.append(kwargs)
+        if self._parse_error is not None:
+            raise self._parse_error
+        message = SimpleNamespace(parsed=self._parsed_report)
+        choice = SimpleNamespace(message=message)
+        return SimpleNamespace(choices=[choice])
