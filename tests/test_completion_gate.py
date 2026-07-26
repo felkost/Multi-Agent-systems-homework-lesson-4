@@ -9,10 +9,12 @@ import re
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
+import httpx
 import pytest
+from openai import BadRequestError
 
 import tools
-from agent import ResearchAgent
+from agent import ReportSection, ResearchAgent, ResearchReport, SourceRef, render_report
 from config import Settings
 
 from fakes import ScriptedChatClient, ScriptedTurn
@@ -128,6 +130,93 @@ def test_fallback_asks_model_when_no_markdown(
     )
     assert len(client.requests) == 3
     assert "tools" not in client.requests[2]
+
+
+def test_fallback_uses_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_read_url(monkeypatch)
+    report = ResearchReport(
+        title="RAG",
+        summary="A synthesized summary.",
+        sections=[ReportSection(heading="Findings", body="RAG helps.")],
+        limitations="Only one source was read.",
+        sources=[SourceRef(url="https://example.com", title="Example")],
+    )
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(content="Here is what I found, in prose."),
+        ],
+        parsed_report=report,
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+
+    result = agent.run("What is RAG?")
+
+    assert result.report_source == "fallback"
+    assert result.saved_report_path is not None
+    saved_text = Path(result.saved_report_path).read_text(encoding="utf-8")
+    assert saved_text == render_report(report)
+    assert len(client.parse_requests) == 1
+    assert client.parse_requests[0]["response_format"] is ResearchReport
+    assert len(client.requests) == 2
+
+
+def test_fallback_falls_back_to_plain_text_when_parse_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_read_url(monkeypatch)
+    bad_response = httpx.Response(
+        400,
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        json={"error": {"message": "model does not support response_format"}},
+    )
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(content="Here is what I found, in prose."),
+            ScriptedTurn(content="# Report\n\nPlain markdown fallback.\n"),
+        ],
+        parse_error=BadRequestError(
+            "model does not support response_format",
+            response=bad_response,
+            body=None,
+        ),
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+
+    result = agent.run("What is RAG?")
+
+    assert result.report_source == "fallback"
+    assert result.saved_report_path is not None
+    assert Path(result.saved_report_path).read_text(encoding="utf-8") == (
+        "# Report\n\nPlain markdown fallback.\n"
+    )
+    assert len(client.parse_requests) == 1
+    assert len(client.requests) == 3
+
+
+def test_rendered_report_citations_are_consistent() -> None:
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[ReportSection(heading="H", body="B")],
+        limitations="L",
+        sources=[
+            SourceRef(url="https://a.example", title="A"),
+            SourceRef(url="https://b.example", title="B"),
+            SourceRef(url="https://c.example", title="C"),
+        ],
+    )
+
+    rendered = render_report(report)
+
+    anchors = set(re.findall(r'<a id="source-(\d+)"></a>', rendered))
+    numbered_entries = set(re.findall(r"</a>(\d+)\. \[", rendered))
+    assert anchors == numbered_entries == {"1", "2", "3"}
 
 
 def test_fallback_reuses_markdown_from_failed_write(

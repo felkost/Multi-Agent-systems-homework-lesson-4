@@ -10,12 +10,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionMessage,
     ChatCompletionMessageToolCallUnion,
 )
+from pydantic import BaseModel, ValidationError
 
 from config import (
     BUDGET_NUDGE_MESSAGE,
@@ -66,6 +67,14 @@ class CompletionsProtocol(Protocol):
         tool_choice: Any = None,
         parallel_tool_calls: Any = None,
     ) -> ChatCompletion: ...
+
+    def parse(
+        self,
+        *,
+        model: Any,
+        messages: Any,
+        response_format: Any,
+    ) -> Any: ...
 
 
 class ChatProtocol(Protocol):
@@ -395,6 +404,80 @@ def _build_report_filename(question: str) -> str:
     return f"research_{slug[:60] or 'report'}"
 
 
+class SourceRef(BaseModel):
+    """One source the fallback report cites, in citation order."""
+
+    url: str
+    title: str
+
+
+class ReportSection(BaseModel):
+    """One body section of a synthesized report."""
+
+    heading: str
+    body: str
+
+
+class ResearchReport(BaseModel):
+    """Structured shape the model fills in when it never wrote a report."""
+
+    title: str
+    summary: str
+    sections: list[ReportSection]
+    limitations: str
+    sources: list[SourceRef]
+
+
+def render_report(report: ResearchReport) -> str:
+    """Render a structured report into the Markdown ``write_report`` expects.
+
+    Parameters
+    ----------
+    report : ResearchReport
+        Structured content the model produced via ``chat.completions.parse``.
+
+    Returns
+    -------
+    str
+        Markdown text, with a numbered ``## Sources`` section whose anchors
+        are built entirely from list order -- the model never has to count
+        sources itself.
+
+    Examples
+    --------
+    >>> report = ResearchReport(
+    ...     title="RAG vs long context",
+    ...     summary="Both have trade-offs.",
+    ...     sections=[ReportSection(heading="Findings", body="RAG wins on cost.")],
+    ...     limitations="Only two sources were read.",
+    ...     sources=[SourceRef(url="https://example.com", title="Example")],
+    ... )
+    >>> print(render_report(report))
+    # RAG vs long context
+    <BLANKLINE>
+    ## Summary
+    Both have trade-offs.
+    <BLANKLINE>
+    ## Findings
+    RAG wins on cost.
+    <BLANKLINE>
+    ## Limitations
+    Only two sources were read.
+    <BLANKLINE>
+    ## Sources
+    <a id="source-1"></a>1. [Example](https://example.com)
+    """
+    lines = [f"# {report.title}", "", "## Summary", report.summary]
+    for section in report.sections:
+        lines += ["", f"## {section.heading}", section.body]
+    lines += ["", "## Limitations", report.limitations, "", "## Sources"]
+    for index, source in enumerate(report.sources, start=1):
+        lines.append(
+            f'<a id="source-{index}"></a>{index}. [{source.title}]({source.url})'
+        )
+    return "\n".join(lines)
+
+
 class ResearchAgent:
     """Research agent that runs its own ReAct loop.
 
@@ -568,11 +651,28 @@ class ResearchAgent:
         next question does not open with "your budget is exhausted." Passing
         no `tools` is itself the guarantee that the model cannot go search
         instead of writing -- there is nothing left it could call.
+
+        `parse()` is tried first: a structured `ResearchReport` means the
+        renderer builds source numbering and anchors deterministically,
+        instead of trusting the model to count correctly. A model or request
+        that does not support strict structured output falls back to a plain
+        `create()` call with free-form markdown.
         """
         messages = [
             *self._messages,
             {"role": "user", "content": FALLBACK_REPORT_REQUEST},
         ]
+        try:
+            completion = self._client.chat.completions.parse(
+                model=self._settings.model_name,
+                messages=messages,
+                response_format=ResearchReport,
+            )
+            report = completion.choices[0].message.parsed
+            if report is not None:
+                return render_report(report)
+        except (BadRequestError, ValidationError):
+            pass
         response = self._client.chat.completions.create(
             model=self._settings.model_name,
             messages=messages,
