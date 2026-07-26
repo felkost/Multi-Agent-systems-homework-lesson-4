@@ -110,7 +110,7 @@ def test_settings_default_prompt_version(
 
     settings = Settings.model_validate({})
 
-    assert settings.prompt_version == "v1"
+    assert settings.prompt_version == "v2"
 
 
 def test_settings_reads_prompt_version(

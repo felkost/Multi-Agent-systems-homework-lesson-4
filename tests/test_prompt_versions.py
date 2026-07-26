@@ -17,6 +17,7 @@ from config import (
     build_system_prompt,
     get_system_prompt,
 )
+from tools import TOOL_REGISTRY
 
 from fakes import ScriptedChatClient, ScriptedTurn
 
@@ -89,6 +90,65 @@ def test_v2_few_example_shows_one_search_per_subquestion() -> None:
     assert prompt.count("web_search(") == 2
     assert prompt.count("read_url(") == 2
     assert prompt.count("write_report(") == 1
+
+
+def test_v2_contains_every_full_rung_section() -> None:
+    prompt = SYSTEM_PROMPTS["v2"]
+
+    for marker in (
+        "# Role",
+        "## Core rules",
+        "## Boundaries",
+        "# Tool policy",
+        "# Research protocol",
+        "# Output contract",
+        "# Example",
+        "# Stop criterion",
+        "# Before you answer",
+    ):
+        assert marker in prompt
+
+
+def test_v2_documents_every_registered_tool() -> None:
+    """Plan E.4: a tool added to `TOOL_REGISTRY` but never named in the
+    prompt is a defect the schema oracle cannot catch, since the model
+    still receives its schema either way."""
+    prompt = SYSTEM_PROMPTS["v2"]
+
+    for name in TOOL_REGISTRY:
+        assert name in prompt
+
+
+def test_v2_boundaries_rule_out_answering_from_memory() -> None:
+    prompt = SYSTEM_PROMPTS["v2"]
+
+    assert "writing or debugging code" in prompt
+    assert "answering from your own memory when no source supports the claim" in prompt
+
+
+def test_v2_before_you_answer_forbids_restating_the_report() -> None:
+    """Stage 6's third measured defect: the final chat message repeated the
+    whole saved report (8.4K tokens) instead of just its path."""
+    prompt = SYSTEM_PROMPTS["v2"]
+
+    assert "your final message repeats that exact path" in prompt
+
+
+def test_settings_default_prompt_version_is_v2(
+    configured_settings: Settings,
+) -> None:
+    assert configured_settings.prompt_version == "v2"
+
+
+def test_agent_defaults_to_the_full_v2_prompt(
+    configured_settings: Settings,
+) -> None:
+    client = ScriptedChatClient([ScriptedTurn(content="Done.")])
+
+    agent = ResearchAgent(configured_settings, client=client)
+
+    assert agent.messages[0]["content"].startswith("# Role")
+    assert "# Before you answer" in agent.messages[0]["content"]
 
 
 def test_get_system_prompt_returns_the_registered_text() -> None:
