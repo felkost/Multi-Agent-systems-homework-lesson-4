@@ -172,18 +172,25 @@ entry, and every Sources entry is cited at least once."""
 # format, no example, no explicit boundaries or protocol yet.
 SYSTEM_PROMPT_V2_MIN = "\n\n".join([_V2_ROLE, _V2_CORE_RULES, _V2_OUTPUT_CONTRACT])
 
-# One example, one topic, one trajectory. Plan L.4: a second example of the
-# same shape would create majority-label bias -- the model starts copying
-# the RAG topic itself instead of the tool-call pattern the example teaches.
+# One example, one topic, one trajectory. Plan L.4 rules out a second
+# example of the same shape (majority-label bias), so the only lever left
+# is which topic the one example uses -- and it must be one the agent will
+# never be asked about. Measured: an earlier version of this section
+# compared RAG techniques, the same subject the agent researches, and the
+# model then reused its literal search string in 30 runs out of 30. With
+# the trajectory rewritten about databases, 0 of 5 did; each wrote a query
+# derived from the actual question instead. A topic-matched example stops
+# demonstrating the format and starts answering the question.
 _V2_EXAMPLE = """# Example
 
-A good sequence for "Compare naive RAG and sentence-window retrieval":
+A good sequence for "Compare PostgreSQL and MongoDB for a high-write
+analytics workload":
 
-    web_search("naive RAG pipeline explained")
-    web_search("sentence window retrieval RAG tradeoffs")
+    web_search("PostgreSQL high write throughput analytics")
+    web_search("MongoDB high write throughput analytics")
     read_url("<best result from the first search>")
     read_url("<best result from the second search>")
-    write_report("rag_comparison.md", "# RAG Comparison\\n\\n## Summary\\n...")
+    write_report("db_comparison.md", "# Database Comparison\\n\\n## Summary\\n...")
 
 One search per sub-question, read the sources, save once."""
 
