@@ -126,6 +126,18 @@ def test_v2_boundaries_rule_out_answering_from_memory() -> None:
     assert "answering from your own memory when no source supports the claim" in prompt
 
 
+def test_v2_before_you_answer_requires_inline_citations() -> None:
+    """The citation format is specified in `# Output contract`, which the
+    model demonstrably read and ignored: stage 7's ladder measured in-text
+    references in only 2 of 13 runs where the model wrote the report
+    itself. This repeats the requirement in the checklist closest to the
+    moment of writing (plan E.5's minimal-change rule: a clause on an
+    existing item, not a new section)."""
+    checklist = SYSTEM_PROMPTS["v2"].split("# Before you answer")[1]
+
+    assert "[n](#source-n)" in checklist
+
+
 def test_v2_before_you_answer_forbids_restating_the_report() -> None:
     """Stage 6's third measured defect: the final chat message repeated the
     whole saved report (8.4K tokens) instead of just its path."""
