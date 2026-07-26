@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     http_retries: int = Field(default=1, ge=0, le=5)
     max_download_bytes: int = Field(default=2_000_000, ge=100_000, le=20_000_000)
     max_iterations: int = Field(default=8, ge=1, le=30)
+    # Deliberately generous: Anthropic's compaction advice is to start by
+    # maximizing recall and tighten only against measured quality (plan I.3),
+    # so this number is due for tuning on the stage-8 eval set, not before.
+    compact_keep_recent: int = Field(default=6, ge=0, le=50)
     max_consecutive_tool_errors: int = Field(default=3, ge=1, le=10)
     output_dir: str = "output"
 
