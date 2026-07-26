@@ -392,8 +392,9 @@ def _build_report_filename(question: str) -> str:
     -------
     str
         A slug derived from the question, without a directory or extension.
-        ``write_report`` sanitizes and timestamps it further, so this name
-        only has to be descriptive, not unique or already safe.
+        ``write_report`` sanitizes, caps the length, and timestamps it
+        further, so this name only has to be descriptive, not unique,
+        already safe, or already short.
 
     Examples
     --------
@@ -401,7 +402,7 @@ def _build_report_filename(question: str) -> str:
     'research_what_is_rag'
     """
     slug = re.sub(r"[^\w]+", "_", question.lower(), flags=re.UNICODE).strip("_")
-    return f"research_{slug[:60] or 'report'}"
+    return f"research_{slug or 'report'}"
 
 
 class SourceRef(BaseModel):

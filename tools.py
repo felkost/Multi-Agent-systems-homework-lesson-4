@@ -284,6 +284,10 @@ READ_URL_SCHEMA: dict[str, Any] = {
 }
 
 
+_MAX_STEM_LENGTH = 40  # keeps the descriptive part short; the timestamp
+# already guarantees uniqueness, so this is purely about readability.
+
+
 def _timestamp() -> str:
     """Current local time as a filename-safe suffix.
 
@@ -335,7 +339,9 @@ def write_report(filename: str, content: str) -> str:
         "",
         stem,
         flags=re.UNICODE,
-    ).strip(".")
+    )[
+        :_MAX_STEM_LENGTH
+    ].strip(".")
     if not safe_stem:
         return "ERROR: Report filename is invalid."
     try:
@@ -343,10 +349,11 @@ def write_report(filename: str, content: str) -> str:
         output_directory = Path(settings.output_dir).resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
 
-        # The timestamp suffix means two saves in the same run, or a rerun of
-        # the same question, never collide -- the model only supplies a
-        # topic slug, never a full filename.
-        report_path = (output_directory / f"{safe_stem}_{_timestamp()}.md").resolve()
+        # The timestamp goes first so a plain directory listing sorts
+        # chronologically; the topic slug after it is what tells two runs
+        # apart at a glance. Together they mean two saves in the same run,
+        # or a rerun of the same question, never collide.
+        report_path = (output_directory / f"{_timestamp()}_{safe_stem}.md").resolve()
         if report_path.parent != output_directory:
             return "ERROR: Report path is outside the output directory."
 

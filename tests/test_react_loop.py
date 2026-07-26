@@ -391,7 +391,7 @@ def test_saved_report_path_is_reported(configured_settings: Settings) -> None:
 
     assert result.report_source == "tool"
     assert result.saved_report_path is not None
-    assert re.fullmatch(r".*[/\\]rag_\d{8}-\d{6}\.md", result.saved_report_path)
+    assert re.fullmatch(r".*[/\\]\d{8}-\d{6}_rag\.md", result.saved_report_path)
 
 
 def test_last_iteration_forces_write_report(

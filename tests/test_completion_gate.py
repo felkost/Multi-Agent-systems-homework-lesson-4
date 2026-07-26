@@ -58,7 +58,7 @@ def test_report_saved_by_agent(configured_settings: Settings) -> None:
     assert Path(result.saved_report_path).read_text(encoding="utf-8") == "# RAG\n"
     saved_names = [path.name for path in _saved_reports(configured_settings)]
     assert len(saved_names) == 1
-    assert re.fullmatch(r"rag_\d{8}-\d{6}\.md", saved_names[0])
+    assert re.fullmatch(r"\d{8}-\d{6}_rag\.md", saved_names[0])
 
 
 def test_no_report_for_non_research_turn(configured_settings: Settings) -> None:
@@ -217,6 +217,57 @@ def test_rendered_report_citations_are_consistent() -> None:
     anchors = set(re.findall(r'<a id="source-(\d+)"></a>', rendered))
     numbered_entries = set(re.findall(r"</a>(\d+)\. \[", rendered))
     assert anchors == numbered_entries == {"1", "2", "3"}
+
+
+def test_fallback_gives_up_when_model_returns_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_read_url(monkeypatch)
+    bad_response = httpx.Response(
+        400,
+        request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"),
+        json={"error": {"message": "model does not support response_format"}},
+    )
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(content="Here is what I found, in prose."),
+            ScriptedTurn(content=""),
+        ],
+        parse_error=BadRequestError(
+            "model does not support response_format",
+            response=bad_response,
+            body=None,
+        ),
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+
+    result = agent.run("What is RAG?")
+
+    assert result.report_source == "none"
+    assert result.saved_report_path is None
+
+
+def test_fallback_reports_none_when_final_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_read_url(monkeypatch)
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(content="Here is what I found, in prose."),
+            ScriptedTurn(content="# Report\n\nSynthesized text.\n"),
+        ]
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+    monkeypatch.setattr(tools.Path, "mkdir", Mock(side_effect=OSError("disk full")))
+
+    result = agent.run("What is RAG?")
+
+    assert result.report_source == "none"
+    assert result.saved_report_path is None
 
 
 def test_fallback_reuses_markdown_from_failed_write(
