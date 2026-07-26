@@ -69,13 +69,19 @@ def format_tool_result(step: ToolStep) -> str:
     return f"📎 Result: [{len(step.result)} chars] {preview}"
 
 
+def _log_step(step: ToolStep) -> None:
+    """Print one executed step's two log lines as soon as it finishes."""
+    print(f"\n{format_tool_call(step)}")
+    print(format_tool_result(step))
+
+
 def main() -> None:
     """Run the interactive research REPL.
 
     Reads questions from the terminal until the user types ``exit`` or sends
-    EOF, printing the name of each tool the agent calls and then the final
-    answer. One `ResearchAgent` serves the whole session, so its message list
-    is the session's memory.
+    EOF, printing each tool call and its result as the agent makes them. One
+    `ResearchAgent` serves the whole session, so its message list is the
+    session's memory.
     """
     print("Research Agent (type 'exit' to quit)")
     print("-" * 40)
@@ -103,7 +109,7 @@ def main() -> None:
             break
 
         try:
-            result = agent.run(user_input)
+            result = agent.run(user_input, on_step=_log_step)
         # A failed request kills the turn, not the session: the user may want
         # to retry the same question or ask a different one. APIError comes
         # first because it is the more specific of the two.
@@ -119,9 +125,6 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\nGoodbye!")
             break
-
-        for step in result.steps:
-            print(f"\nTool: {step.name}")
 
         if result.final_answer is not None:
             print(f"\nAgent: {result.final_answer}")
