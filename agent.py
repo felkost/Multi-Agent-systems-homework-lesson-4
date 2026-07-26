@@ -102,7 +102,7 @@ class RunState:
     """What one turn accumulated while its tools ran."""
 
     tool_calls_made: int = 0
-    successful_reads: int = 0
+    read_urls: list[str] = field(default_factory=list)
     consecutive_tool_errors: int = 0
     # Keyed on the raw query string. Lives only as long as this RunState (one
     # run()); a repeat of the same phrase in a later question is not a cache
@@ -111,6 +111,35 @@ class RunState:
     last_report_markdown: str | None = None
     last_report_filename: str | None = None
     saved_report_path: str | None = None
+
+    @property
+    def successful_reads(self) -> int:
+        """How many `read_url` calls returned a page during this turn."""
+        return len(self.read_urls)
+
+
+@dataclass(slots=True)
+class SessionState:
+    """What the session accumulated, one `RunState` per finished turn.
+
+    Notes
+    -----
+    Without it a turn's business state dies with its `RunState` while the
+    messages live on, so "what have you already read?" has two answers that
+    drift apart (12-factor #5, plan H.3).
+    """
+
+    runs: list[RunState] = field(default_factory=list)
+
+    @property
+    def all_read_urls(self) -> set[str]:
+        """Every URL read successfully so far, deduplicated."""
+        return {url for run in self.runs for url in run.read_urls}
+
+    @property
+    def all_saved_reports(self) -> list[str]:
+        """Paths of the reports saved so far, oldest first."""
+        return [run.saved_report_path for run in self.runs if run.saved_report_path]
 
 
 @dataclass(slots=True)
@@ -276,7 +305,7 @@ def _execute_tool_call(
     if name == "web_search" and ok and isinstance(arguments.get("query"), str):
         state.search_cache[arguments["query"]] = content
     if name == "read_url" and ok:
-        state.successful_reads += 1
+        state.read_urls.append(str(arguments["url"]))
     if name == "write_report" and content.startswith(REPORT_SAVED_PREFIX):
         state.saved_report_path = content.removeprefix(REPORT_SAVED_PREFIX).strip()
 
@@ -507,11 +536,17 @@ class ResearchAgent:
         self._client: LLMClient = client
         system_prompt = SYSTEM_PROMPT.format(max_iterations=settings.max_iterations)
         self._messages: Messages = [{"role": "system", "content": system_prompt}]
+        self._session = SessionState()
 
     @property
     def messages(self) -> Messages:
         """Conversation history of the whole session, oldest message first."""
         return self._messages
+
+    @property
+    def session(self) -> SessionState:
+        """Sources read and reports saved, accumulated over every turn."""
+        return self._session
 
     def run(self, user_input: str) -> AgentResult:
         """Answer one question, calling tools until the model stops asking.
@@ -556,7 +591,12 @@ class ResearchAgent:
         # otherwise leave a tool_call_id without its tool result, and every
         # later request would fail with HTTP 400.
         self._messages = step.messages
-        return self._finish(step, steps, state, iteration, user_input)
+        result = self._finish(step, steps, state, iteration, user_input)
+        # The completion gate can still save a report after the loop ended, so
+        # the turn's own record is only complete once _finish has run.
+        state.saved_report_path = result.saved_report_path
+        self._session.runs.append(state)
+        return result
 
     def _finish(
         self,
