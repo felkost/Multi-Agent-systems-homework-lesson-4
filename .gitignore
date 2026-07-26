@@ -13,6 +13,11 @@ venv/
 doc/
 docs/
 
+# Stage 7 K.3-style measurement harnesses (e.g. the L.2 prompt ladder) and
+# everything they produce: logs, CSV results, generated reports. Never
+# committed -- throwaway experiments, not the shipped agent.
+experiments/
+
 # Markdown: only the README and generated reports are tracked. Agent-facing
 # docs (CLAUDE.md, AGENTS.md, CONTRIBUTING.md, insights.md, handoff.md,
 # CHANGELOG.md) are intentionally local-only by request - they never leave

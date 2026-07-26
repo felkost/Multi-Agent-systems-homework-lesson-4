@@ -202,7 +202,10 @@ def test_run_without_on_step_is_unaffected(
 
 
 def test_system_prompt_is_first_message(configured_settings: Settings) -> None:
-    agent, _ = _agent(configured_settings, [ScriptedTurn(content="Answer.")])
+    # Pinned to v1: this test checks the loop puts a system prompt first,
+    # not what stage 7's prompt says -- v1's wording is the fixed point.
+    settings = configured_settings.model_copy(update={"prompt_version": "v1"})
+    agent, _ = _agent(settings, [ScriptedTurn(content="Answer.")])
 
     agent.run("A question.")
 
@@ -592,10 +595,15 @@ def test_forced_write_report_skipped_when_already_saved(
 def test_system_prompt_states_the_iteration_budget(
     configured_settings: Settings,
 ) -> None:
-    configured_settings.max_iterations = 5
+    # Pinned to v1 for the same reason as test_system_prompt_is_first_message
+    # above: the budget-in-prompt mechanic is stage 3's, v1's wording of it
+    # is what this test pins.
+    settings = configured_settings.model_copy(
+        update={"prompt_version": "v1", "max_iterations": 5}
+    )
     client = ScriptedChatClient([ScriptedTurn(content="Answer.")])
 
-    agent = ResearchAgent(configured_settings, client=client)
+    agent = ResearchAgent(settings, client=client)
 
     assert "5 tool-call turns" in agent.messages[0]["content"]
 

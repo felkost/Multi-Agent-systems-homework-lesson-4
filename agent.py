@@ -21,16 +21,16 @@ from openai.types.chat import (
     ChatCompletionMessage,
     ChatCompletionMessageToolCallUnion,
 )
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from config import (
     BUDGET_NUDGE_MESSAGE,
     ERROR_PREFIX,
     FALLBACK_REPORT_REQUEST,
-    PROMPT_VERSION,
+    FALLBACK_STRUCTURED_REPORT_REQUEST,
     REPORT_SAVED_PREFIX,
-    SYSTEM_PROMPT,
     Settings,
+    build_system_prompt,
 )
 from tools import TOOL_REGISTRY, TOOL_SCHEMAS, write_report
 
@@ -203,6 +203,10 @@ class RunState:
     last_report_markdown: str | None = None
     last_report_filename: str | None = None
     saved_report_path: str | None = None
+    # The Markdown that actually reached disk, whichever path wrote it.
+    # Kept so a finished turn can be checked against `read_urls` without
+    # reading the file back.
+    saved_report_markdown: str | None = None
 
     @property
     def successful_reads(self) -> int:
@@ -255,6 +259,12 @@ class AgentResult:
     stop_reason: StopReason
     saved_report_path: str | None
     report_source: ReportSource
+    # True when the saved report lists a URL no `read_url` returned. The
+    # gate's own path cannot produce this (render_report filters), so it
+    # only ever flags a report the model wrote itself -- where hl-4
+    # requires free-form Markdown, leaving the code able to report the
+    # problem but not to fix it.
+    cites_unread_sources: bool = False
 
 
 def _assistant_message_to_dict(message: ChatCompletionMessage) -> dict[str, Any]:
@@ -504,6 +514,7 @@ def _execute_tool_call(
         state.read_urls.append(str(arguments["url"]))
     if name == "write_report" and content.startswith(REPORT_SAVED_PREFIX):
         state.saved_report_path = content.removeprefix(REPORT_SAVED_PREFIX).strip()
+        state.saved_report_markdown = state.last_report_markdown
 
     return ToolStep(name=name, arguments=arguments, result=content, ok=ok)
 
@@ -612,6 +623,25 @@ def react_step(
     return StepResult(updated, steps, None, None)
 
 
+_MARKDOWN_LINK_URL_RE = re.compile(r"\]\((https?://[^)\s]+)\)")
+
+
+def _cites_unread_sources(markdown: str | None, read_urls: list[str]) -> bool:
+    """Whether `markdown` links to a URL that no `read_url` returned.
+
+    Examples
+    --------
+    >>> _cites_unread_sources("[A](https://a.example)", ["https://a.example"])
+    False
+    >>> _cites_unread_sources("[B](https://b.example)", ["https://a.example"])
+    True
+    """
+    if not markdown:
+        return False
+    linked = set(_MARKDOWN_LINK_URL_RE.findall(markdown))
+    return bool(linked - set(read_urls))
+
+
 def _build_report_filename(question: str) -> str:
     """Build a fallback report filename from the user's question.
 
@@ -649,6 +679,17 @@ class ReportSection(BaseModel):
 
     heading: str
     body: str
+    # URLs, not numbers: a section is written before any numbering exists,
+    # which is precisely why asking the model for `[n](#source-n)` here
+    # produced reports with anchors and no references to them (stage 7).
+    source_urls: list[str] = Field(
+        default_factory=list,
+        description=(
+            "URLs of the sources this section's claims come from. Use the "
+            "URL itself, not a number: citation numbers are assigned when "
+            "the report is rendered."
+        ),
+    )
 
 
 class ResearchReport(BaseModel):
@@ -661,27 +702,66 @@ class ResearchReport(BaseModel):
     sources: list[SourceRef]
 
 
-def render_report(report: ResearchReport) -> str:
+# Headings `render_report` writes itself, each from its own schema field.
+# A model section carrying one of these names produced the heading twice
+# (seen in 1 report of 5), so such a section is folded into the block that
+# owns the name instead of printing a second one -- folded rather than
+# dropped, since the model wrote that text and losing it silently would be
+# the same class of dishonesty as silently rewriting it.
+_OWN_HEADINGS = ("summary", "limitations", "sources")
+
+
+def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> str:
     """Render a structured report into the Markdown ``write_report`` expects.
 
     Parameters
     ----------
     report : ResearchReport
         Structured content the model produced via ``chat.completions.parse``.
+    read_urls : set of str, optional
+        URLs the agent actually opened this turn. When given, every source
+        outside it is dropped before anything is numbered. Omitting it
+        keeps all sources, which is what a caller with no read log wants.
 
     Returns
     -------
     str
-        Markdown text, with a numbered ``## Sources`` section whose anchors
-        are built entirely from list order -- the model never has to count
-        sources itself.
+        Markdown text whose in-text ``[n](#source-n)`` references, anchors
+        and ``## Sources`` numbering are all derived here, from the URLs
+        each section declared -- the model never counts anything itself.
+
+    Notes
+    -----
+    Numbering follows first appearance in the text, which is what the
+    prompt's own output contract promises; making the renderer honour it
+    is cheaper than asking the model to. Sources land in the list only
+    when a section cites them, so both halves of "every reference has an
+    entry, every entry is referenced" hold by construction -- stage 7
+    measured 16 of 17 fallback reports failing the second half, because
+    anchors were rendered from a list nothing pointed at.
+
+    A report whose sections declare no sources at all keeps the older,
+    reference-free rendering: an untagged report should still carry the
+    record of what was read.
+
+    Filtering by `read_urls` happens before numbering rather than after,
+    so a dropped source leaves no gap in the sequence. Internal
+    consistency is not truthfulness: a real run produced a perfectly
+    balanced report citing a page the agent had only seen in search
+    results, which is the case this parameter exists for.
 
     Examples
     --------
     >>> report = ResearchReport(
     ...     title="RAG vs long context",
     ...     summary="Both have trade-offs.",
-    ...     sections=[ReportSection(heading="Findings", body="RAG wins on cost.")],
+    ...     sections=[
+    ...         ReportSection(
+    ...             heading="Findings",
+    ...             body="RAG wins on cost.",
+    ...             source_urls=["https://example.com"],
+    ...         )
+    ...     ],
     ...     limitations="Only two sources were read.",
     ...     sources=[SourceRef(url="https://example.com", title="Example")],
     ... )
@@ -694,20 +774,60 @@ def render_report(report: ResearchReport) -> str:
     ## Findings
     RAG wins on cost.
     <BLANKLINE>
+    [1](#source-1)
+    <BLANKLINE>
     ## Limitations
     Only two sources were read.
     <BLANKLINE>
     ## Sources
     <a id="source-1"></a>1. [Example](https://example.com)
     """
-    lines = [f"# {report.title}", "", "## Summary", report.summary]
+    sources = report.sources
+    if read_urls is not None:
+        sources = [source for source in sources if source.url in read_urls]
+    titles = {source.url: source.title for source in sources}
+    cited: list[str] = []
     for section in report.sections:
-        lines += ["", f"## {section.heading}", section.body]
-    lines += ["", "## Limitations", report.limitations, "", "## Sources"]
-    for index, source in enumerate(report.sources, start=1):
-        lines.append(
-            f'<a id="source-{index}"></a>{index}. [{source.title}]({source.url})'
+        for url in section.source_urls:
+            # An unlisted URL is dropped rather than numbered: it would get
+            # an anchor with no title and no evidence a tool ever returned it.
+            if url in titles and url not in cited:
+                cited.append(url)
+    numbers = {url: index for index, url in enumerate(cited, start=1)}
+
+    def rendered(section: ReportSection) -> str:
+        references = " ".join(
+            f"[{numbers[url]}](#source-{numbers[url]})"
+            for url in dict.fromkeys(section.source_urls)
+            if url in numbers
         )
+        # Own paragraph, not appended inline: a body ending in a Markdown
+        # table swallowed the markers into its last cell (stage-7 A/B).
+        return f"{section.body}\n\n{references}" if references else section.body
+
+    body_sections: list[ReportSection] = []
+    folded: dict[str, list[ReportSection]] = {name: [] for name in _OWN_HEADINGS}
+    for section in report.sections:
+        folded.get(section.heading.strip().lower(), body_sections).append(section)
+
+    lines = [f"# {report.title}", "", "## Summary", report.summary]
+    lines += [line for s in folded["summary"] for line in ("", rendered(s))]
+    for section in body_sections:
+        lines += ["", f"## {section.heading}", rendered(section)]
+    lines += ["", "## Limitations", report.limitations]
+    lines += [line for s in folded["limitations"] for line in ("", rendered(s))]
+    lines += ["", "## Sources"]
+    lines += [line for s in folded["sources"] for line in (rendered(s), "")]
+
+    if cited:
+        entries = [(numbers[url], titles[url], url) for url in cited]
+    else:
+        entries = [
+            (index, source.title, source.url)
+            for index, source in enumerate(sources, start=1)
+        ]
+    for index, title, url in entries:
+        lines.append(f'<a id="source-{index}"></a>{index}. [{title}]({url})')
     return "\n".join(lines)
 
 
@@ -737,7 +857,9 @@ class ResearchAgent:
         # later call through self._client is then checked against the SDK's
         # own strict overloads instead of this Protocol.
         self._client: LLMClient = client
-        system_prompt = SYSTEM_PROMPT.format(max_iterations=settings.max_iterations)
+        system_prompt = build_system_prompt(
+            settings.prompt_version, settings.max_iterations
+        )
         self._messages: Messages = [{"role": "system", "content": system_prompt}]
         self._session = SessionState()
 
@@ -787,7 +909,7 @@ class ResearchAgent:
                 {
                     "model": self._settings.model_name,
                     "max_iterations": self._settings.max_iterations,
-                    "prompt_version": PROMPT_VERSION,
+                    "prompt_version": self._settings.prompt_version,
                 }
             )
 
@@ -853,6 +975,9 @@ class ResearchAgent:
             stop_reason=stop_reason,
             saved_report_path=saved_report_path,
             report_source=report_source,
+            cites_unread_sources=_cites_unread_sources(
+                state.saved_report_markdown, state.read_urls
+            ),
         )
 
     def _ensure_report_saved(
@@ -901,7 +1026,7 @@ class ResearchAgent:
 
         markdown = state.last_report_markdown
         if markdown is None:
-            markdown = self._request_report_markdown()
+            markdown = self._request_report_markdown(set(state.read_urls))
         if markdown is None or not markdown.strip():
             return None, "none"
 
@@ -909,10 +1034,11 @@ class ResearchAgent:
             filename=_build_report_filename(question), content=markdown
         )
         if result.startswith(REPORT_SAVED_PREFIX):
+            state.saved_report_markdown = markdown
             return result.removeprefix(REPORT_SAVED_PREFIX).strip(), "fallback"
         return None, "none"
 
-    def _request_report_markdown(self) -> str | None:
+    def _request_report_markdown(self, read_urls: set[str]) -> str | None:
         """Ask the model for a final report with no tools available.
 
         Returns
@@ -934,25 +1060,35 @@ class ResearchAgent:
         instead of trusting the model to count correctly. A model or request
         that does not support strict structured output falls back to a plain
         `create()` call with free-form markdown.
+
+        The two paths ask for different things on purpose. Only the
+        structured one is followed by `render_report`, so only it can tell
+        the model that citation markers are added for it; saying the same
+        on the plain path would leave that report with no citations at all.
         """
-        messages = [
-            *self._messages,
-            {"role": "user", "content": FALLBACK_REPORT_REQUEST},
-        ]
         try:
             completion = self._client.chat.completions.parse(
                 model=self._settings.model_name,
-                messages=messages,
+                messages=[
+                    *self._messages,
+                    {
+                        "role": "user",
+                        "content": FALLBACK_STRUCTURED_REPORT_REQUEST,
+                    },
+                ],
                 response_format=ResearchReport,
             )
             report = completion.choices[0].message.parsed
             if report is not None:
-                return render_report(report)
+                return render_report(report, read_urls=read_urls)
         except (BadRequestError, ValidationError):
             pass
         response = self._client.chat.completions.create(
             model=self._settings.model_name,
-            messages=messages,
+            messages=[
+                *self._messages,
+                {"role": "user", "content": FALLBACK_REPORT_REQUEST},
+            ],
             temperature=self._settings.temperature,
         )
         return response.choices[0].message.content

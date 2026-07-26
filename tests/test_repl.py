@@ -169,6 +169,22 @@ def test_repl_settings_error_exits_before_the_loop(
     assert "Configuration error" in capsys.readouterr().out
 
 
+def test_repl_unknown_prompt_version_exits_before_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = configured_settings.model_copy(update={"prompt_version": "v9"})
+    monkeypatch.setattr(main, "load_settings", lambda: settings)
+    input_spy = Mock()
+    monkeypatch.setattr("builtins.input", input_spy)
+
+    main.main()
+
+    input_spy.assert_not_called()
+    assert "Unknown prompt version 'v9'" in capsys.readouterr().out
+
+
 def test_configure_console_uses_emoji_icons_by_default() -> None:
     tool_icon, result_icon = main._configure_console()
 
@@ -244,3 +260,47 @@ def test_repl_reports_that_a_requested_trace_will_not_happen(
     _run_repl(monkeypatch, settings, ["exit"])
 
     assert "not traced" in capsys.readouterr().out
+
+
+def test_repl_warns_when_the_report_cites_an_unread_source(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = AgentResult(
+        final_answer="Saved to output/report.md",
+        steps=[],
+        iterations_used=1,
+        budget_exhausted=False,
+        stop_reason="goal_satisfied",
+        saved_report_path="output/report.md",
+        report_source="tool",
+        cites_unread_sources=True,
+    )
+    monkeypatch.setattr(agent_module.ResearchAgent, "run", Mock(return_value=result))
+
+    _run_repl(monkeypatch, configured_settings, ["What is RAG?", "exit"])
+
+    assert "could not be opened" in capsys.readouterr().out
+
+
+def test_repl_stays_quiet_when_every_source_was_read(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = AgentResult(
+        final_answer="Saved to output/report.md",
+        steps=[],
+        iterations_used=1,
+        budget_exhausted=False,
+        stop_reason="goal_satisfied",
+        saved_report_path="output/report.md",
+        report_source="tool",
+        cites_unread_sources=False,
+    )
+    monkeypatch.setattr(agent_module.ResearchAgent, "run", Mock(return_value=result))
+
+    _run_repl(monkeypatch, configured_settings, ["What is RAG?", "exit"])
+
+    assert "could not be opened" not in capsys.readouterr().out

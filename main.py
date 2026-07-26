@@ -178,7 +178,13 @@ def main() -> None:
     if notice is not None:
         print(notice)
 
-    agent = ResearchAgent(settings)
+    try:
+        agent = ResearchAgent(settings)
+    except ValueError as error:
+        # Only get_system_prompt raises this here, and its message already
+        # lists the versions that do exist.
+        print(f"Configuration error: {error}")
+        return
 
     while True:
         try:
@@ -218,6 +224,15 @@ def main() -> None:
 
         if result.final_answer is not None:
             print(f"\nAgent: {result.final_answer}")
+
+        # The agent cannot rewrite a report the model wrote itself (hl-4
+        # wants free-form Markdown there), so the honest move is to say so
+        # rather than let an unread source pass as evidence.
+        if result.cites_unread_sources:
+            print(
+                "\nWarning: the report lists a source that could not be "
+                "opened -- treat those claims as unverified."
+            )
 
 
 if __name__ == "__main__":

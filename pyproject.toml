@@ -1,6 +1,10 @@
 [tool.black]
 line-length = 88
 target-version = ["py312"]
+# experiments/ holds throwaway K.3-style measurement scripts (plan
+# Appendix K.3), gitignored and never part of the shipped agent -- same
+# reasoning as excluding output/ and example_output/ below.
+extend-exclude = "experiments/"
 
 [tool.mypy]
 python_version = "3.12"
@@ -8,7 +12,7 @@ ignore_missing_imports = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
-exclude = '^(\.venv|venv|output|example_output)/'
+exclude = '^(\.venv|venv|output|example_output|experiments)/'
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
