@@ -543,6 +543,7 @@ def test_write_report_rejects_filename_with_no_safe_characters() -> None:
         ("report.txt", "report"),
         ("../test-report.txt", "test-report"),
         (r"..\..\windows.exe", "windows"),
+        ("a" * 60, "a" * 40),
     ],
 )
 def test_write_report_keeps_path_inside_output(
@@ -562,7 +563,7 @@ def test_write_report_keeps_path_inside_output(
 
     assert report_path.parent == output_directory
     assert re.fullmatch(
-        rf"{re.escape(expected_stem)}_\d{{8}}-\d{{6}}\.md", report_path.name
+        rf"\d{{8}}-\d{{6}}_{re.escape(expected_stem)}\.md", report_path.name
     )
     assert report_path.read_text(encoding="utf-8") == content
 
