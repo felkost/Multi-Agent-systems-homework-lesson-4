@@ -374,6 +374,75 @@ def test_rendered_report_drops_a_source_no_section_cites() -> None:
     assert "unused.example" not in rendered
 
 
+def test_rendered_report_drops_sources_that_were_not_read() -> None:
+    """R7a: a URL the agent never opened must not reach the Sources list.
+
+    Measured on a real run: a fallback report cited `meilisearch.com`,
+    which had only ever appeared in search results. R1 made citations
+    internally consistent, which is not the same as true.
+    """
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[
+            ReportSection(
+                heading="H",
+                body="Claim.",
+                source_urls=["https://read.example", "https://unread.example"],
+            )
+        ],
+        limitations="L",
+        sources=[
+            SourceRef(url="https://read.example", title="Read"),
+            SourceRef(url="https://unread.example", title="Never opened"),
+        ],
+    )
+
+    rendered = render_report(report, read_urls={"https://read.example"})
+
+    in_text, anchors, _ = _citation_numbers(rendered)
+
+    assert in_text == anchors == {"1"}
+    assert "unread.example" not in rendered
+    assert "read.example" in rendered
+
+
+def test_rendered_report_keeps_every_source_when_reads_are_unknown() -> None:
+    """Omitting `read_urls` keeps the pre-R7a behaviour, so the renderer
+    stays usable by callers that have no read log to check against."""
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[
+            ReportSection(heading="H", body="Claim.", source_urls=["https://a.example"])
+        ],
+        limitations="L",
+        sources=[SourceRef(url="https://a.example", title="A")],
+    )
+
+    assert "a.example" in render_report(report)
+
+
+def test_rendered_report_filters_unread_sources_without_tagged_sections() -> None:
+    """The untagged-report branch filters too, or it would smuggle back in
+    exactly the phantom sources the tagged branch just removed."""
+    report = ResearchReport(
+        title="T",
+        summary="S",
+        sections=[ReportSection(heading="H", body="B")],
+        limitations="L",
+        sources=[
+            SourceRef(url="https://read.example", title="Read"),
+            SourceRef(url="https://unread.example", title="Never opened"),
+        ],
+    )
+
+    rendered = render_report(report, read_urls={"https://read.example"})
+
+    assert "read.example" in rendered
+    assert "unread.example" not in rendered
+
+
 def test_rendered_report_without_tagged_sections_still_lists_sources() -> None:
     """An untagged report keeps the pre-R1 rendering rather than losing its
     sources: no in-text references are possible, but the list is still the
@@ -467,3 +536,99 @@ def test_fallback_reuses_markdown_from_failed_write(
     assert result.saved_report_path is not None
     assert Path(result.saved_report_path).read_text(encoding="utf-8") == "# RAG\n"
     assert len(client.requests) == 2
+
+
+def test_model_report_citing_an_unread_source_is_flagged(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    """R7b: the tool path keeps free-form Markdown, so the code cannot fix
+    a phantom source there -- but it must not pretend not to see one."""
+    _patch_read_url(monkeypatch)
+    markdown = (
+        "# RAG\n\n## Findings\nClaim. [1](#source-1)\n\n## Sources\n"
+        '<a id="source-1"></a>1. [Read](https://example.com)\n'
+        '<a id="source-2"></a>2. [Never opened](https://phantom.example)\n'
+    )
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(
+                tool_calls=[("write_report", {"filename": "rag", "content": markdown})]
+            ),
+            ScriptedTurn(content="Saved."),
+        ]
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+
+    result = agent.run("What is RAG?")
+
+    assert result.report_source == "tool"
+    assert result.cites_unread_sources is True
+
+
+def test_model_report_citing_only_read_sources_is_not_flagged(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    _patch_read_url(monkeypatch)
+    markdown = (
+        "# RAG\n\n## Findings\nClaim. [1](#source-1)\n\n## Sources\n"
+        '<a id="source-1"></a>1. [Read](https://example.com)\n'
+    )
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(
+                tool_calls=[("write_report", {"filename": "rag", "content": markdown})]
+            ),
+            ScriptedTurn(content="Saved."),
+        ]
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+
+    result = agent.run("What is RAG?")
+
+    assert result.report_source == "tool"
+    assert result.cites_unread_sources is False
+
+
+def test_fallback_report_never_cites_an_unread_source(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_settings: Settings,
+) -> None:
+    """The invariant R7a buys: the gate's own report cannot carry a source
+    the agent failed to open, even when the model lists one."""
+    _patch_read_url(monkeypatch)
+    report = ResearchReport(
+        title="RAG",
+        summary="A synthesized summary.",
+        sections=[
+            ReportSection(
+                heading="Findings",
+                body="RAG helps.",
+                source_urls=["https://example.com", "https://phantom.example"],
+            )
+        ],
+        limitations="Only one source was read.",
+        sources=[
+            SourceRef(url="https://example.com", title="Read"),
+            SourceRef(url="https://phantom.example", title="Never opened"),
+        ],
+    )
+    client = ScriptedChatClient(
+        [
+            ScriptedTurn(tool_calls=[("read_url", {"url": "https://example.com"})]),
+            ScriptedTurn(content="Here is what I found, in prose."),
+        ],
+        parsed_report=report,
+    )
+    agent = ResearchAgent(configured_settings, client=client)
+
+    result = agent.run("What is RAG?")
+
+    assert result.report_source == "fallback"
+    assert result.cites_unread_sources is False
+    assert result.saved_report_path is not None
+    saved = Path(result.saved_report_path).read_text(encoding="utf-8")
+    assert "phantom.example" not in saved

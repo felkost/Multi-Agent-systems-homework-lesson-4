@@ -202,6 +202,10 @@ class RunState:
     last_report_markdown: str | None = None
     last_report_filename: str | None = None
     saved_report_path: str | None = None
+    # The Markdown that actually reached disk, whichever path wrote it.
+    # Kept so a finished turn can be checked against `read_urls` without
+    # reading the file back.
+    saved_report_markdown: str | None = None
 
     @property
     def successful_reads(self) -> int:
@@ -254,6 +258,12 @@ class AgentResult:
     stop_reason: StopReason
     saved_report_path: str | None
     report_source: ReportSource
+    # True when the saved report lists a URL no `read_url` returned. The
+    # gate's own path cannot produce this (render_report filters), so it
+    # only ever flags a report the model wrote itself -- where hl-4
+    # requires free-form Markdown, leaving the code able to report the
+    # problem but not to fix it.
+    cites_unread_sources: bool = False
 
 
 def _assistant_message_to_dict(message: ChatCompletionMessage) -> dict[str, Any]:
@@ -503,6 +513,7 @@ def _execute_tool_call(
         state.read_urls.append(str(arguments["url"]))
     if name == "write_report" and content.startswith(REPORT_SAVED_PREFIX):
         state.saved_report_path = content.removeprefix(REPORT_SAVED_PREFIX).strip()
+        state.saved_report_markdown = state.last_report_markdown
 
     return ToolStep(name=name, arguments=arguments, result=content, ok=ok)
 
@@ -611,6 +622,25 @@ def react_step(
     return StepResult(updated, steps, None, None)
 
 
+_MARKDOWN_LINK_URL_RE = re.compile(r"\]\((https?://[^)\s]+)\)")
+
+
+def _cites_unread_sources(markdown: str | None, read_urls: list[str]) -> bool:
+    """Whether `markdown` links to a URL that no `read_url` returned.
+
+    Examples
+    --------
+    >>> _cites_unread_sources("[A](https://a.example)", ["https://a.example"])
+    False
+    >>> _cites_unread_sources("[B](https://b.example)", ["https://a.example"])
+    True
+    """
+    if not markdown:
+        return False
+    linked = set(_MARKDOWN_LINK_URL_RE.findall(markdown))
+    return bool(linked - set(read_urls))
+
+
 def _build_report_filename(question: str) -> str:
     """Build a fallback report filename from the user's question.
 
@@ -671,13 +701,17 @@ class ResearchReport(BaseModel):
     sources: list[SourceRef]
 
 
-def render_report(report: ResearchReport) -> str:
+def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> str:
     """Render a structured report into the Markdown ``write_report`` expects.
 
     Parameters
     ----------
     report : ResearchReport
         Structured content the model produced via ``chat.completions.parse``.
+    read_urls : set of str, optional
+        URLs the agent actually opened this turn. When given, every source
+        outside it is dropped before anything is numbered. Omitting it
+        keeps all sources, which is what a caller with no read log wants.
 
     Returns
     -------
@@ -699,6 +733,12 @@ def render_report(report: ResearchReport) -> str:
     A report whose sections declare no sources at all keeps the older,
     reference-free rendering: an untagged report should still carry the
     record of what was read.
+
+    Filtering by `read_urls` happens before numbering rather than after,
+    so a dropped source leaves no gap in the sequence. Internal
+    consistency is not truthfulness: a real run produced a perfectly
+    balanced report citing a page the agent had only seen in search
+    results, which is the case this parameter exists for.
 
     Examples
     --------
@@ -730,7 +770,10 @@ def render_report(report: ResearchReport) -> str:
     ## Sources
     <a id="source-1"></a>1. [Example](https://example.com)
     """
-    titles = {source.url: source.title for source in report.sources}
+    sources = report.sources
+    if read_urls is not None:
+        sources = [source for source in sources if source.url in read_urls]
+    titles = {source.url: source.title for source in sources}
     cited: list[str] = []
     for section in report.sections:
         for url in section.source_urls:
@@ -756,7 +799,7 @@ def render_report(report: ResearchReport) -> str:
     else:
         entries = [
             (index, source.title, source.url)
-            for index, source in enumerate(report.sources, start=1)
+            for index, source in enumerate(sources, start=1)
         ]
     for index, title, url in entries:
         lines.append(f'<a id="source-{index}"></a>{index}. [{title}]({url})')
@@ -907,6 +950,9 @@ class ResearchAgent:
             stop_reason=stop_reason,
             saved_report_path=saved_report_path,
             report_source=report_source,
+            cites_unread_sources=_cites_unread_sources(
+                state.saved_report_markdown, state.read_urls
+            ),
         )
 
     def _ensure_report_saved(
@@ -955,7 +1001,7 @@ class ResearchAgent:
 
         markdown = state.last_report_markdown
         if markdown is None:
-            markdown = self._request_report_markdown()
+            markdown = self._request_report_markdown(set(state.read_urls))
         if markdown is None or not markdown.strip():
             return None, "none"
 
@@ -963,10 +1009,11 @@ class ResearchAgent:
             filename=_build_report_filename(question), content=markdown
         )
         if result.startswith(REPORT_SAVED_PREFIX):
+            state.saved_report_markdown = markdown
             return result.removeprefix(REPORT_SAVED_PREFIX).strip(), "fallback"
         return None, "none"
 
-    def _request_report_markdown(self) -> str | None:
+    def _request_report_markdown(self, read_urls: set[str]) -> str | None:
         """Ask the model for a final report with no tools available.
 
         Returns
@@ -1001,7 +1048,7 @@ class ResearchAgent:
             )
             report = completion.choices[0].message.parsed
             if report is not None:
-                return render_report(report)
+                return render_report(report, read_urls=read_urls)
         except (BadRequestError, ValidationError):
             pass
         response = self._client.chat.completions.create(

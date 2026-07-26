@@ -225,6 +225,15 @@ def main() -> None:
         if result.final_answer is not None:
             print(f"\nAgent: {result.final_answer}")
 
+        # The agent cannot rewrite a report the model wrote itself (hl-4
+        # wants free-form Markdown there), so the honest move is to say so
+        # rather than let an unread source pass as evidence.
+        if result.cites_unread_sources:
+            print(
+                "\nWarning: the report lists a source that could not be "
+                "opened -- treat those claims as unverified."
+            )
+
 
 if __name__ == "__main__":
     main()
