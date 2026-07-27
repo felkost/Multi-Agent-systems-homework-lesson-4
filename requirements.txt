@@ -1,9 +1,7 @@
-langchain>=1.2.0
 ddgs>=7.0
 trafilatura>=2.0.0
 pydantic>=2.12.0
 pydantic-settings>=2.12.0
-langchain-openai==1.4.0
 httpx==0.28.1
 openai==2.46.0
 langsmith==0.10.9
