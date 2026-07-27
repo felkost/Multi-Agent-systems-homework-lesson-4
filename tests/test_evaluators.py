@@ -483,6 +483,27 @@ def test_final_answer_is_concise_does_not_score_a_run_without_a_report() -> None
     assert result["score"] is None
 
 
+@pytest.mark.parametrize("answer", ["", "   \n  "])
+def test_final_answer_is_concise_does_not_score_a_run_cut_off_mid_loop(
+    tmp_path: Path,
+    answer: str,
+) -> None:
+    """An empty answer means the loop hit `iteration_limit` or `tool_failures`
+    before the model was ever asked to speak -- a different defect, with a
+    different fix, from restating the whole report. Measured on the first
+    clean dev pair: all 28 empty answers across both runs had
+    `stop_reason != "goal_satisfied"`, none of them any other reason."""
+    path = tmp_path / "report.md"
+
+    result = final_answer_is_concise(
+        run_outputs(saved_report_path=str(path), final_answer=answer),
+        reference(),
+    )
+
+    assert result["score"] is None
+    assert "before the model wrote an answer" in result["comment"]
+
+
 @pytest.mark.parametrize("evaluator", EVALUATORS, ids=lambda e: e.__name__)
 def test_every_evaluator_matches_the_installed_sdk_signature(
     evaluator: Any,
