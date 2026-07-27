@@ -1,3 +1,6 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date
 
 from pydantic import Field, SecretStr
@@ -49,13 +52,54 @@ class Settings(BaseSettings):
     )
 
 
+_output_dir_override: ContextVar[str | None] = ContextVar(
+    "output_dir_override", default=None
+)
+
+
+@contextmanager
+def output_directory(path: str) -> Iterator[None]:
+    """Send reports written inside this block to `path`.
+
+    Parameters
+    ----------
+    path : str
+        Directory for `tools.write_report` to save into.
+
+    Yields
+    ------
+    None
+
+    Notes
+    -----
+    Every tool calls `load_settings` itself on each invocation rather than
+    receiving the agent's `Settings`, so a `model_copy` passed into
+    `ResearchAgent` never reaches `write_report`. The obvious workaround --
+    assigning ``os.environ["OUTPUT_DIR"]`` -- is process-global, which makes
+    it unusable the moment two runs proceed at once: one run's report lands
+    in another's directory.
+
+    A `ContextVar` is the same redirection scoped to the caller instead of
+    the process. `contextvars` values do not leak across threads, and the one
+    concurrent caller this exists for (`evals.run_eval`) runs each example
+    through `copy_context().run(...)`, so every example sees only what it set
+    itself.
+    """
+    token = _output_dir_override.set(path)
+    try:
+        yield
+    finally:
+        _output_dir_override.reset(token)
+
+
 def load_settings() -> Settings:
     """Build `Settings` from the environment and ``.env``.
 
     Returns
     -------
     Settings
-        Validated configuration.
+        Validated configuration, with `output_dir` replaced when the caller
+        is inside an `output_directory` block.
 
     Raises
     ------
@@ -65,7 +109,11 @@ def load_settings() -> Settings:
     # model_validate({}) rather than Settings(): the settings sources still
     # read the environment and .env, but mypy no longer demands api_key as a
     # constructor argument.
-    return Settings.model_validate({})
+    settings = Settings.model_validate({})
+    override = _output_dir_override.get()
+    if override is None:
+        return settings
+    return settings.model_copy(update={"output_dir": override})
 
 
 # The two prefixes that make a tool result machine-readable. The loop decides

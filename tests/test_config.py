@@ -1,7 +1,9 @@
+from contextvars import copy_context
+
 import pytest
 from pydantic import ValidationError
 
-from config import Settings
+from config import Settings, load_settings, output_directory
 
 
 def test_settings_reads_environment_aliases(
@@ -134,3 +136,73 @@ def test_settings_rejects_out_of_range_download_size(
 
     with pytest.raises(ValidationError):
         Settings.model_validate({})
+
+
+def test_output_directory_redirects_saved_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret-key")
+
+    with output_directory("somewhere/else"):
+        assert load_settings().output_dir == "somewhere/else"
+
+
+def test_output_directory_restores_the_previous_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret-key")
+    monkeypatch.setenv("OUTPUT_DIR", "output")
+
+    with output_directory("somewhere/else"):
+        pass
+
+    assert load_settings().output_dir == "output"
+
+
+def test_output_directory_restores_the_previous_setting_after_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret-key")
+    monkeypatch.setenv("OUTPUT_DIR", "output")
+
+    with pytest.raises(RuntimeError):
+        with output_directory("somewhere/else"):
+            raise RuntimeError("the agent blew up mid-run")
+
+    assert load_settings().output_dir == "output"
+
+
+def test_output_directory_nests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret-key")
+
+    with output_directory("outer"):
+        with output_directory("inner"):
+            assert load_settings().output_dir == "inner"
+        assert load_settings().output_dir == "outer"
+
+
+def test_output_directory_does_not_leak_between_copied_contexts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The property the whole mechanism exists for.
+
+    `evaluate()` submits every example through `copy_context().run(...)`
+    (`langsmith.utils.ContextThreadPoolExecutor`), so one example's redirect
+    must be invisible to the next. An `os.environ` assignment would fail this
+    test, which is the reason it is not one.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret-key")
+    monkeypatch.setenv("OUTPUT_DIR", "output")
+    seen: list[str] = []
+
+    def one_example(directory: str) -> None:
+        with output_directory(directory):
+            seen.append(load_settings().output_dir)
+
+    copy_context().run(one_example, "example-a")
+    copy_context().run(one_example, "example-b")
+
+    assert seen == ["example-a", "example-b"]
+    assert load_settings().output_dir == "output"
