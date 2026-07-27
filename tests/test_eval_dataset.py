@@ -9,7 +9,7 @@ import re
 
 import pytest
 
-from config import SYSTEM_PROMPTS
+from research_agent.prompts import SYSTEM_PROMPTS
 from evals.dataset import (
     COMMON_KNOWN_BAD,
     DEV_DATASET,

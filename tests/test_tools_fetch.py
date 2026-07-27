@@ -1,139 +1,23 @@
-"""Characterization tests pinning the observable contract of ``web_search``,
-``read_url`` and ``write_report`` while the agent around them is rewritten.
+"""Characterization tests pinning the observable contract of ``read_url``.
 
 Every assertion is about behaviour that reaches the model's context — exact
-error strings, output normalization, file-path safety — not implementation
+error strings, output normalization, retry policy — not implementation
 details. ``call_tool`` (conftest.py) is the only place that knows how a tool
 name is resolved to a callable.
 """
 
 from collections.abc import Iterator
-from pathlib import Path
 from unittest.mock import Mock
-import re
 
 import httpx
 import pytest
 
-import tools
-from config import Settings
+from research_agent.settings import Settings
+from research_agent.tools import fetch
 
 from conftest import call_tool
 
 pytestmark = pytest.mark.usefixtures("patch_tool_settings")
-
-
-# ---------------------------------------------------------------------------
-# web_search
-# ---------------------------------------------------------------------------
-
-
-def test_web_search_rejects_empty_query() -> None:
-    result = call_tool("web_search", query="   ")
-
-    assert (
-        result
-        == "ERROR: Search query cannot be empty. Provide a specific question or phrase."
-    )
-
-
-def test_web_search_normalizes_and_removes_duplicates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    search_client = Mock()
-    search_client.text.return_value = [
-        {
-            "title": "First result",
-            "href": "https://example.com/first",
-            "body": "First snippet",
-        },
-        {
-            "title": "Duplicate result",
-            "href": "https://example.com/first",
-            "body": "Duplicate snippet",
-        },
-        {
-            "title": "Second result",
-            "href": "https://example.com/second",
-            "body": "Second snippet",
-        },
-    ]
-    ddgs_class = Mock(return_value=search_client)
-    monkeypatch.setattr(tools, "DDGS", ddgs_class)
-
-    result = call_tool("web_search", query="  RAG retrieval  ")
-
-    assert result == [
-        {
-            "title": "First result",
-            "url": "https://example.com/first",
-            "snippet": "First snippet",
-        },
-        {
-            "title": "Second result",
-            "url": "https://example.com/second",
-            "snippet": "Second snippet",
-        },
-    ]
-    ddgs_class.assert_called_once_with()
-    search_client.text.assert_called_once_with("RAG retrieval", max_results=3)
-
-
-def test_web_search_handles_missing_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    search_client = Mock()
-    search_client.text.return_value = [
-        {"href": "https://example.com/no-fields"},
-        {"title": "Missing URL", "body": "This result must be skipped"},
-    ]
-    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
-
-    result = call_tool("web_search", query="test")
-
-    assert result == [
-        {
-            "title": "Untitled",
-            "url": "https://example.com/no-fields",
-            "snippet": "",
-        }
-    ]
-
-
-def test_web_search_truncates_snippet(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    search_client = Mock()
-    search_client.text.return_value = [
-        {
-            "title": "Long result",
-            "href": "https://example.com/long",
-            "body": "x" * 150,
-        }
-    ]
-    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
-
-    result = call_tool("web_search", query="long text")
-
-    assert isinstance(result, list)
-    assert result[0]["snippet"] == "x" * 100
-
-
-def test_web_search_returns_safe_network_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    search_client = Mock()
-    search_client.text.side_effect = RuntimeError("private DNS and system details")
-    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
-
-    result = call_tool("web_search", query="test")
-
-    assert result == "ERROR: Web search is temporarily unavailable."
-
-
-# ---------------------------------------------------------------------------
-# read_url
-# ---------------------------------------------------------------------------
 
 TOO_LARGE_ERROR = (
     "ERROR: The page is too large to read. "
@@ -206,7 +90,7 @@ def _patch_stream(
 ) -> Mock:
     """Install `stream` as ``httpx.stream`` and return the call recorder."""
     stream_mock = Mock(return_value=stream)
-    monkeypatch.setattr(tools.httpx, "stream", stream_mock)
+    monkeypatch.setattr(fetch.httpx, "stream", stream_mock)
     return stream_mock
 
 
@@ -223,7 +107,7 @@ def test_read_url_rejects_non_http_scheme(
 
 def test_read_url_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        tools.httpx,
+        fetch.httpx,
         "stream",
         Mock(side_effect=httpx.TimeoutException("timed out")),
     )
@@ -262,7 +146,7 @@ def test_read_url_does_not_retry_client_error(
 ) -> None:
     configured_settings.http_retries = 2
     sleep_mock = Mock()
-    monkeypatch.setattr(tools.time, "sleep", sleep_mock)
+    monkeypatch.setattr(fetch.time, "sleep", sleep_mock)
     stream = FakeStream(
         [b"<html>not found</html>"],
         status_error=httpx.HTTPStatusError(
@@ -285,11 +169,11 @@ def test_read_url_retries_transient_error_once(
 ) -> None:
     configured_settings.http_retries = 1
     sleep_mock = Mock()
-    monkeypatch.setattr(tools.time, "sleep", sleep_mock)
+    monkeypatch.setattr(fetch.time, "sleep", sleep_mock)
     good_stream = FakeStream([b"<html>recovered</html>"])
     stream_mock = Mock(side_effect=[httpx.TimeoutException("timed out"), good_stream])
-    monkeypatch.setattr(tools.httpx, "stream", stream_mock)
-    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Recovered"))
+    monkeypatch.setattr(fetch.httpx, "stream", stream_mock)
+    monkeypatch.setattr(fetch.trafilatura, "extract", Mock(return_value="Recovered"))
 
     result = call_tool("read_url", url="https://example.com")
 
@@ -303,7 +187,7 @@ def test_read_url_retries_server_error(
     configured_settings: Settings,
 ) -> None:
     configured_settings.http_retries = 1
-    monkeypatch.setattr(tools.time, "sleep", Mock())
+    monkeypatch.setattr(fetch.time, "sleep", Mock())
     bad_stream = FakeStream(
         [b""],
         status_error=httpx.HTTPStatusError(
@@ -314,9 +198,9 @@ def test_read_url_retries_server_error(
     )
     good_stream = FakeStream([b"<html>recovered</html>"])
     monkeypatch.setattr(
-        tools.httpx, "stream", Mock(side_effect=[bad_stream, good_stream])
+        fetch.httpx, "stream", Mock(side_effect=[bad_stream, good_stream])
     )
-    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Recovered"))
+    monkeypatch.setattr(fetch.trafilatura, "extract", Mock(return_value="Recovered"))
 
     result = call_tool("read_url", url="https://example.com")
 
@@ -328,9 +212,9 @@ def test_read_url_gives_up_after_retry_exhausted(
     configured_settings: Settings,
 ) -> None:
     configured_settings.http_retries = 1
-    monkeypatch.setattr(tools.time, "sleep", Mock())
+    monkeypatch.setattr(fetch.time, "sleep", Mock())
     stream_mock = Mock(side_effect=httpx.TimeoutException("timed out"))
-    monkeypatch.setattr(tools.httpx, "stream", stream_mock)
+    monkeypatch.setattr(fetch.httpx, "stream", stream_mock)
 
     result = call_tool("read_url", url="https://example.com")
 
@@ -345,7 +229,7 @@ def test_read_url_handles_empty_extract(monkeypatch: pytest.MonkeyPatch) -> None
     body = b"<html><body></body></html>"
     stream_mock = _patch_stream(monkeypatch, FakeStream([body]))
     extract_mock = Mock(return_value=None)
-    monkeypatch.setattr(tools.trafilatura, "extract", extract_mock)
+    monkeypatch.setattr(fetch.trafilatura, "extract", extract_mock)
 
     result = call_tool("read_url", url="https://example.com")
 
@@ -367,7 +251,7 @@ def test_read_url_handles_unexpected_extraction_error(
 ) -> None:
     _patch_stream(monkeypatch, FakeStream([b"<html>content</html>"]))
     monkeypatch.setattr(
-        tools.trafilatura,
+        fetch.trafilatura,
         "extract",
         Mock(side_effect=ValueError("unexpected parser failure")),
     )
@@ -382,7 +266,7 @@ def test_read_url_returns_text_within_limit_unmodified(
 ) -> None:
     _patch_stream(monkeypatch, FakeStream([b"<html>short</html>"]))
     monkeypatch.setattr(
-        tools.trafilatura,
+        fetch.trafilatura,
         "extract",
         Mock(return_value="x" * 1000),
     )
@@ -398,7 +282,7 @@ def test_read_url_truncates_extracted_text(
 ) -> None:
     _patch_stream(monkeypatch, FakeStream([b"<html>long content</html>"]))
     monkeypatch.setattr(
-        tools.trafilatura,
+        fetch.trafilatura,
         "extract",
         Mock(return_value="x" * 1100),
     )
@@ -456,7 +340,7 @@ def test_read_url_accepts_page_at_exact_limit(
     stream = FakeStream([b"x" * (limit // 2)] * 2)
     _patch_stream(monkeypatch, stream)
     monkeypatch.setattr(
-        tools.trafilatura,
+        fetch.trafilatura,
         "extract",
         Mock(return_value="page text"),
     )
@@ -490,12 +374,12 @@ def test_read_url_replaces_undecodable_bytes(
 ) -> None:
     _patch_stream(monkeypatch, FakeStream([b"<html>caf\xe9</html>"]))
     extract_mock = Mock(return_value="café")
-    monkeypatch.setattr(tools.trafilatura, "extract", extract_mock)
+    monkeypatch.setattr(fetch.trafilatura, "extract", extract_mock)
 
     result = call_tool("read_url", url="https://example.com/latin1")
 
     assert result == "café"
-    assert "\ufffd" in extract_mock.call_args.args[0]
+    assert "�" in extract_mock.call_args.args[0]
 
 
 def test_read_url_accepts_uppercase_content_type(
@@ -506,7 +390,7 @@ def test_read_url_accepts_uppercase_content_type(
         FakeStream([b"<html>ok</html>"], content_type="TEXT/HTML"),
     )
     monkeypatch.setattr(
-        tools.trafilatura,
+        fetch.trafilatura,
         "extract",
         Mock(return_value="page text"),
     )
@@ -514,69 +398,3 @@ def test_read_url_accepts_uppercase_content_type(
     result = call_tool("read_url", url="https://example.com/shouty")
 
     assert result == "page text"
-
-
-# ---------------------------------------------------------------------------
-# write_report
-# ---------------------------------------------------------------------------
-
-
-def test_write_report_rejects_empty_content() -> None:
-    result = call_tool("write_report", filename="empty", content="   ")
-
-    assert (
-        result == "ERROR: Report content cannot be empty. Write the Markdown "
-        "report first, then save it."
-    )
-
-
-def test_write_report_rejects_filename_with_no_safe_characters() -> None:
-    result = call_tool("write_report", filename="...", content="text")
-
-    assert result == "ERROR: Report filename is invalid."
-
-
-@pytest.mark.parametrize(
-    ("filename", "expected_stem"),
-    [
-        ("report", "report"),
-        ("report.txt", "report"),
-        ("../test-report.txt", "test-report"),
-        (r"..\..\windows.exe", "windows"),
-        ("a" * 60, "a" * 40),
-    ],
-)
-def test_write_report_keeps_path_inside_output(
-    configured_settings: Settings,
-    filename: str,
-    expected_stem: str,
-) -> None:
-    content = "# Тестовий звіт\n\nТекст українською."
-
-    result = call_tool("write_report", filename=filename, content=content)
-
-    assert isinstance(result, str)
-    assert result.startswith("Report saved to: ")
-
-    report_path = Path(result.removeprefix("Report saved to: "))
-    output_directory = Path(configured_settings.output_dir).resolve()
-
-    assert report_path.parent == output_directory
-    assert re.fullmatch(
-        rf"\d{{8}}-\d{{6}}_{re.escape(expected_stem)}\.md", report_path.name
-    )
-    assert report_path.read_text(encoding="utf-8") == content
-
-
-def test_write_report_handles_unexpected_save_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        tools.Path,
-        "mkdir",
-        Mock(side_effect=OSError("disk full")),
-    )
-
-    result = call_tool("write_report", filename="report", content="text")
-
-    assert result == "ERROR: Report could not be saved."

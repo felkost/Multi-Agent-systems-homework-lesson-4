@@ -11,12 +11,13 @@ if str(ROOT) not in sys.path:
 import pytest  # noqa: E402
 from langsmith.utils import get_env_var  # noqa: E402
 
-import agent  # noqa: E402
-import tools  # noqa: E402
-from config import Settings  # noqa: E402
+from research_agent.settings import Settings  # noqa: E402
+from research_agent.tools import TOOL_REGISTRY  # noqa: E402
+from research_agent.tools import fetch, report_writer, search  # noqa: E402
+from research_agent.tracing import _TRACING_FLAGS  # noqa: E402
 
 _TRACING_ENVIRONMENT = (
-    *agent._TRACING_FLAGS,
+    *_TRACING_FLAGS,
     "LANGSMITH_API_KEY",
     "LANGSMITH_PROJECT",
     "LANGSMITH_ENDPOINT",
@@ -31,7 +32,7 @@ def call_tool(name: str, **kwargs: Any) -> Any:
     independent of how tools are wired up: stage 2 replaced LangChain
     ``BaseTool`` objects with plain functions by editing only this helper.
     """
-    return tools.TOOL_REGISTRY[name](**kwargs)
+    return TOOL_REGISTRY[name](**kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -85,8 +86,6 @@ def patch_tool_settings(
     monkeypatch: pytest.MonkeyPatch,
     configured_settings: Settings,
 ) -> None:
-    monkeypatch.setattr(
-        tools,
-        "load_settings",
-        lambda: configured_settings,
-    )
+    monkeypatch.setattr(search, "load_settings", lambda: configured_settings)
+    monkeypatch.setattr(fetch, "load_settings", lambda: configured_settings)
+    monkeypatch.setattr(report_writer, "load_settings", lambda: configured_settings)

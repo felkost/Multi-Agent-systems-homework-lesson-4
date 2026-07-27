@@ -8,7 +8,7 @@ tool's full payload into the console.
 import json
 
 from agent import ToolStep
-from main import format_tool_call, format_tool_result
+from research_agent.cli import format_tool_call, format_tool_result
 
 
 def test_format_tool_call_renders_string_arguments() -> None:

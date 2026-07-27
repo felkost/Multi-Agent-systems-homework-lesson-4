@@ -17,9 +17,9 @@ from langsmith.utils import ContextThreadPoolExecutor
 from pydantic import SecretStr
 
 import evals.run_eval as run_eval
-import tools
 from agent import AgentResult, ToolStep
-from config import Settings
+from research_agent.settings import Settings
+from research_agent.tools import fetch, search
 from evals.dataset import DEV_DATASET, get_split
 from evals.run_eval import (
     _final_result,
@@ -42,7 +42,7 @@ def _patch_search(
     search_client.text.return_value = [
         {"title": "Result", "href": url, "body": "A snippet"}
     ]
-    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
+    monkeypatch.setattr(search, "DDGS", Mock(return_value=search_client))
 
 
 def _patch_read_url(monkeypatch: pytest.MonkeyPatch, text: str = "Hello") -> None:
@@ -54,8 +54,8 @@ def _patch_read_url(monkeypatch: pytest.MonkeyPatch, text: str = "Hello") -> Non
     stream_context = MagicMock()
     stream_context.__enter__.return_value = response
     stream_context.__exit__.return_value = False
-    monkeypatch.setattr(tools.httpx, "stream", Mock(return_value=stream_context))
-    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value=text))
+    monkeypatch.setattr(fetch.httpx, "stream", Mock(return_value=stream_context))
+    monkeypatch.setattr(fetch.trafilatura, "extract", Mock(return_value=text))
 
 
 def _agent_result(

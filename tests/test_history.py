@@ -11,9 +11,10 @@ from unittest.mock import Mock
 
 import pytest
 
-import tools
 from agent import Messages, ResearchAgent, compact_history
-from config import REPORT_SAVED_PREFIX, Settings
+from research_agent.settings import Settings
+from research_agent.tools import search
+from research_agent.tools.contract import REPORT_SAVED_PREFIX
 
 from fakes import ScriptedChatClient, ScriptedTurn
 
@@ -193,7 +194,7 @@ def test_agent_keeps_earlier_queries_visible_after_compaction(
             "body": "A snippet that should not survive compaction.",
         }
     ]
-    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
+    monkeypatch.setattr(search, "DDGS", Mock(return_value=search_client))
     settings = configured_settings.model_copy(update={"compact_keep_recent": 0})
     client = ScriptedChatClient(
         [

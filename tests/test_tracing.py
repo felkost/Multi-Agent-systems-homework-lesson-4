@@ -14,10 +14,11 @@ from langsmith.client import Client
 from langsmith.run_helpers import get_current_run_tree, tracing_context
 from langsmith.utils import get_env_var, tracing_is_enabled
 
-import agent as agent_module
-import tools
-from agent import ResearchAgent, ToolStep, build_client, configure_tracing
-from config import Settings
+from agent import ResearchAgent, ToolStep, build_client
+from research_agent import llm as llm_module
+from research_agent.settings import Settings
+from research_agent.tools import search as tools_search
+from research_agent.tracing import configure_tracing
 from fakes import ScriptedChatClient, ScriptedTurn
 
 
@@ -130,7 +131,7 @@ def test_build_client_wraps_only_when_tracing_is_on(
         wrapped.append(client)
         return client
 
-    monkeypatch.setattr(agent_module, "wrap_openai", spy)
+    monkeypatch.setattr(llm_module, "wrap_openai", spy)
 
     build_client(_settings(monkeypatch))
     assert wrapped == []
@@ -156,7 +157,9 @@ def test_tracing_disabled_makes_no_langsmith_calls(
     monkeypatch.setattr(Client, "request_with_retries", fail)
     monkeypatch.setattr(Client, "multipart_ingest", fail)
     monkeypatch.setattr(
-        tools, "DDGS", lambda: _FakeDDGS([{"title": "T", "href": "u", "body": "b"}])
+        tools_search,
+        "DDGS",
+        lambda: _FakeDDGS([{"title": "T", "href": "u", "body": "b"}]),
     )
     client = ScriptedChatClient(
         [
@@ -183,10 +186,10 @@ def test_tool_call_becomes_a_tool_span_with_its_arguments(
         spans.append(get_current_run_tree())
         return [{"title": "T", "href": "https://example.com", "body": "b"}]
 
-    monkeypatch.setattr(tools, "DDGS", lambda: _FakeDDGS(search=search))
+    monkeypatch.setattr(tools_search, "DDGS", lambda: _FakeDDGS(search=search))
 
     with tracing_context(enabled="local"):
-        tools.web_search("rag chunking")
+        tools_search.web_search("rag chunking")
 
     span = spans[0]
 
@@ -216,7 +219,7 @@ def test_tool_spans_nest_inside_the_research_run(
         tool_spans.append(get_current_run_tree())
         return [{"title": "T", "href": "https://example.com", "body": "b"}]
 
-    monkeypatch.setattr(tools, "DDGS", lambda: _FakeDDGS(search=search))
+    monkeypatch.setattr(tools_search, "DDGS", lambda: _FakeDDGS(search=search))
     client = ScriptedChatClient(
         [
             ScriptedTurn(tool_calls=[("web_search", {"query": "rag"})]),

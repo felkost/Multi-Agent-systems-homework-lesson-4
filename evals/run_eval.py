@@ -23,7 +23,8 @@ from langsmith import Client
 from langsmith.evaluation import evaluate
 
 from agent import AgentResult, LLMClient, ResearchAgent, ToolStep
-from config import SYSTEM_PROMPTS, Settings, load_settings, output_directory
+from research_agent.prompts import SYSTEM_PROMPTS
+from research_agent.settings import Settings, load_settings, output_directory
 from evals.dataset import Split, get_split
 from evals.evaluators import EVALUATORS
 
@@ -104,7 +105,7 @@ def build_target(
     Parameters
     ----------
     prompt_version : str
-        Key into `config.SYSTEM_PROMPTS`. Rides in the run's own trace
+        Key into `research_agent.prompts.SYSTEM_PROMPTS`. Rides in the run's own trace
         metadata (`agent.ResearchAgent.run`), which is how an experiment is
         attributed to the text that produced it.
     output_root : Path
@@ -306,7 +307,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--prompt-version",
         required=True,
         choices=sorted(SYSTEM_PROMPTS),
-        help="Key into config.SYSTEM_PROMPTS.",
+        help="Key into research_agent.prompts.SYSTEM_PROMPTS.",
     )
     parser.add_argument(
         "--dataset",

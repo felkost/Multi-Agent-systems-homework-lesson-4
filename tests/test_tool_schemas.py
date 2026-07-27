@@ -1,4 +1,4 @@
-"""Schema tests for the OpenAI tool-calling definitions in ``tools.py``.
+"""Schema tests for the OpenAI tool-calling definitions in ``research_agent.tools``.
 
 The JSON Schema is written by hand — the hl-4 brief requires seeing the
 protocol rather than generating it from a decorator. These tests take over
@@ -16,7 +16,7 @@ from typing import Any, get_type_hints
 
 import pytest
 
-from tools import TOOL_REGISTRY, TOOL_SCHEMAS
+from research_agent.tools import TOOL_REGISTRY, TOOL_SCHEMAS
 
 _JSON_TYPES: dict[type, str] = {str: "string"}
 
