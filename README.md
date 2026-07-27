@@ -28,30 +28,18 @@ A terminal research agent. It searches the web, reads pages, and saves a Markdow
 
 Dev tools: `pytest`, `black`, `flake8`, `mypy`.
 
-**Why no LangChain?** This project replaces a framework's ReAct loop with a
-hand-written one, on purpose. A framework hides the real prompts and tool
-calls the model sends and receives, and this project exists to make that
-flow visible. See [Design notes](#design-notes) for the full reasoning.
+**Why no LangChain?** This project replaces a framework's ReAct loop with a hand-written one, on purpose. A framework hides the real prompts and tool calls the model sends and receives, and this project exists to make that flow visible. See [Design notes](#design-notes) for the full reasoning.
 
 ## Architecture
 
-`main.py` is three lines long. It imports `research_agent.cli` and calls
-its `main()` function, which runs the interactive REPL.
+`main.py` is three lines long. It imports `research_agent.cli` and calls its `main()` function, which runs the interactive REPL.
 
-The REPL creates one `ResearchAgent` and asks it every question the user
-types, until the user types `exit`. `ResearchAgent` keeps two kinds of
-memory. One is the message list the model sees. The other is
-`SessionState`: sources read and reports saved, shown by the `:stats`
-command.
+The REPL creates one `ResearchAgent` and asks it every question the user types, until the user types `exit`. `ResearchAgent` keeps two kinds of memory. One is the message list the model sees. The other is
+`SessionState`: sources read and reports saved, shown by the `:stats` command.
 
-Each turn runs `react_step` in a loop. It sends the message history and
-the three tool schemas to the OpenAI API. It runs any tool call the model
-asks for. It repeats until the model stops on its own, or a limit is hit.
+Each turn runs `react_step` in a loop. It sends the message history and the three tool schemas to the OpenAI API. It runs any tool call the model asks for. It repeats until the model stops on its own, or a limit is hit.
 
-After the loop ends, a **completion gate** checks whether a report was
-saved. If the model never called `write_report`, the gate asks the model
-one more time for report text, and saves the report itself. Either way,
-the agent records which path produced the saved file.
+After the loop ends, a **completion gate** checks whether a report was saved. If the model never called `write_report`, the gate asks the model one more time for report text, and saves the report itself. Either way, the agent records which path produced the saved file.
 
 ### Components
 
@@ -76,9 +64,7 @@ flowchart TD
     REACT -.-> PROMPTS["prompts/"]
 ```
 
-Dotted arrows point at supporting modules: configuration, message
-compaction, plain data types, and tracing. They are not part of the main
-flow, but every box above depends on at least one of them.
+Dotted arrows point at supporting modules: configuration, message compaction, plain data types, and tracing. They are not part of the main flow, but every box above depends on at least one of them.
 
 ### One request, step by step
 
@@ -180,19 +166,12 @@ Now open `.env` and fill in the values below.
 
 ### Troubleshooting
 
-**A tool call crashes the console with `UnicodeEncodeError`.** The step
-log uses two emoji, 🔧 and 📎. An older Windows console, set to a
-non-UTF-8 code page, cannot print them. Set `PYTHONIOENCODING=utf-8`
-before running the agent. The agent also detects this on its own and
-falls back to plain ASCII markers, so this is rare.
+**A tool call crashes the console with `UnicodeEncodeError`.** The step log uses two emoji, 🔧 and 📎. An older Windows console, set to a non-UTF-8 code page, cannot print them. Set `PYTHONIOENCODING=utf-8`
+before running the agent. The agent also detects this on its own and falls back to plain ASCII markers, so this is rare.
 
-**`&&` does not work between commands.** Windows PowerShell 5.1 has no
-`&&` operator. Run one command at a time, or join them with `;`:
-`command1; if ($?) { command2 }`.
+**`&&` does not work between commands.** Windows PowerShell 5.1 has no `&&` operator. Run one command at a time, or join them with `;`: `command1; if ($?) { command2 }`.
 
-**`Activate.ps1` is blocked.** PowerShell's execution policy can refuse
-to run any script. Run this once, in the same window, before activating:
-`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`.
+**`Activate.ps1` is blocked.** PowerShell's execution policy can refuse to run any script. Run this once, in the same window, before activating: `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`.
 
 ## Usage
 
@@ -200,11 +179,9 @@ to run any script. Run this once, in the same window, before activating:
 python main.py
 ```
 
-Type a question and press Enter. Type `:stats` to see sources read and
-reports saved this session. Type `exit` or `quit` to leave.
+Type a question and press Enter. Type `:stats` to see sources read and reports saved this session. Type `exit` or `quit` to leave.
 
-Here is real console output from a live run. Tracing was on for this run,
-which is why the second line mentions a LangSmith project.
+Here is real console output from a live run. Tracing was on for this run, which is why the second line mentions a LangSmith project.
 
 ```text
 Research Agent (type 'exit' to quit, ':stats' for session stats)
@@ -261,27 +238,18 @@ You: exit
 Goodbye!
 ```
 
-**One line in this transcript is false, on purpose left in.** The model's
-last line names a file, `Zstandard_vs_gzip_HTTP_compression.md`. That file
-never existed. The model never called `write_report` on this turn.
+**One line in this transcript is false, on purpose left in.** The model's last line names a file, `Zstandard_vs_gzip_HTTP_compression.md`. That file never existed. The model never called `write_report` on this turn.
 
-The **completion gate** noticed this. No report had been saved yet. It
-asked the model once more for report text, and saved the result under a
-different name:
+The **completion gate** noticed this. No report had been saved yet. It asked the model once more for report text, and saved the result under a different name:
 [`20260727-200651_research_compare_zstandard_and_gzip_for_.md`](output/20260727-200651_research_compare_zstandard_and_gzip_for_.md).
-`:stats` shows this true, saved path. Asked directly which file it saved,
-the model repeats its own earlier, wrong answer — a correct memory of an
-incorrect statement. The full transcript, with more detail on this defect,
-is in
+`:stats` shows this true, saved path. Asked directly which file it saved, the model repeats its own earlier, wrong answer — a correct memory of an incorrect statement. The full transcript, with more detail on this defect, is in
 [`output/20260727-200651_session-log.md`](output/20260727-200651_session-log.md).
 
-The number and order of tool calls is the model's own choice. A real run
-can look different from this one.
+The number and order of tool calls is the model's own choice. A real run can look different from this one.
 
 ## What this implements
 
-This table maps the assignment's requirements to the code that satisfies
-them.
+This table maps the assignment's requirements to the code that satisfies them.
 
 | Requirement | Where | Proof |
 | --- | --- | --- |
@@ -298,26 +266,16 @@ them.
 | Multi-step reasoning: several tool calls per question | The prompt asks for at least one search and two reads | See the second nuance below. |
 | A saved Markdown report | `research_agent/tools/report_writer.py`: `write_report` | See the third nuance below. |
 
-Three nuances are worth stating plainly, because each one is a real,
-deliberate exception to the row above it:
+Three nuances are worth stating plainly, because each one is a real, deliberate exception to the row above it:
 
-1. **Forced `tool_choice` on the last iteration.** If no report is saved
-   yet when the iteration budget is about to run out, the code forces the
-   next call to be `write_report`. This overrides "the model decides,"
+1. **Forced `tool_choice` on the last iteration.** If no report is saved yet when the iteration budget is about to run out, the code forces the next call to be `write_report`. This overrides "the model decides,"
    on purpose, so a run never ends with nothing saved.
-2. **"Several tool calls" is not enforced in code.** A short follow-up
-   question (for example, "which file did you save?") can legally make
-   zero tool calls. The prompt asks for multi-step research; nothing in
-   the loop requires it.
-3. **The fallback path calls the same `write_report` function.** When the
-   completion gate saves a report instead of the model, it uses the exact
-   tool the model would have used. The agent then records which path ran,
-   honestly, as `report_source`.
+2. **"Several tool calls" is not enforced in code.** A short follow-up question (for example, "which file did you save?") can legally make zero tool calls. The prompt asks for multi-step research; nothing in the loop requires it.
+3. **The fallback path calls the same `write_report` function.** When the completion gate saves a report instead of the model, it uses the exact tool the model would have used. The agent then records which path ran, honestly, as `report_source`.
 
 ## Prompting techniques applied
 
-The lecture's prompt sections have different names in this project. The
-mapping:
+The lecture's prompt sections have different names in this project. The mapping:
 
 | Prompt section | Lecture term |
 | --- | --- |
@@ -329,8 +287,7 @@ mapping:
 | `# Example` | Few-shot |
 | `# Before you answer` | Sandwich / recency reinforcement |
 
-Every number below comes from real runs on `gpt-4.1-mini`, traced into
-LangSmith (full detail and raw data: `docs/prompting-techniques.md`,
+Every number below comes from real runs on `gpt-4.1-mini`, traced into LangSmith (full detail and raw data: `docs/prompting-techniques.md`,
 local-only).
 
 | Technique | What changed | Measured effect |
@@ -340,11 +297,8 @@ local-only).
 | Explicit output format alone (`# Output contract`) | Same citation rule, without the sandwich repeat | Ignored in 9 of 10 reports. **Necessary, but not sufficient** — stating a format once is not enough; repeating it at the decision point is what worked. |
 | Zero-shot chain-of-thought ("Let's think step by step") | Tool calls, iterations, final trajectory | **Measured and rejected.** No behavior changed, and it cost 28% more wall time. |
 
-Some prompt sections are used but were not measured on their own — for
-example, the persona in `# Role` is present in every version tested, so
-nothing ever varied it. Applying a technique and measuring its effect are
-two different claims, and this project only makes the second one where a
-real experiment backs it.
+Some prompt sections are used but were not measured on their own — for example, the persona in `# Role` is present in every version tested, so nothing ever varied it. Applying a technique and measuring its effect are
+two different claims, and this project only makes the second one where a real experiment backs it.
 
 ## Evaluation
 
@@ -354,12 +308,9 @@ Run the evaluation suite against the dev split:
 python -m evals.run_eval --prompt-version v2 --dataset dev
 ```
 
-This sends 15 questions through the agent, 3 times each, and scores every
-run with 12 deterministic checks plus one LLM judge. It needs a real
-OpenAI key and a LangSmith account, and costs real money.
+This sends 15 questions through the agent, 3 times each, and scores every run with 12 deterministic checks plus one LLM judge. It needs a real OpenAI key and a LangSmith account, and costs real money.
 
-Numbers below compare the baseline prompt (`v1`) with the current one
-(`v2`), 45 runs per prompt on the dev split.
+Numbers below compare the baseline prompt (`v1`) with the current one (`v2`), 45 runs per prompt on the dev split.
 
 | Metric | v1 | v2 | Significant? |
 | --- | --- | --- | --- |
@@ -369,23 +320,13 @@ Numbers below compare the baseline prompt (`v1`) with the current one
 | Only cites pages the agent actually read | 97.2% | 100% | No |
 
 **v2 doubles citation compliance, and also regresses badly on one thing:**
-its final chat answer tends to restate the whole report instead of just
-pointing at the saved file. This defect is understood, but `v2` does not
-fix it. Fixing it means changing the prompt, and this measurement was run
-against the prompt as shipped, on purpose.
+its final chat answer tends to restate the whole report instead of just pointing at the saved file. This defect is understood, but `v2` does not fix it. Fixing it means changing the prompt, and this measurement was run against the prompt as shipped, on purpose.
 
-A one-shot run against 6 unseen questions (the held-out split, run once by
-design) confirms both findings: citation compliance holds at 80–87%, and
-the conciseness regression reproduces fully, 0 of 9 non-empty answers pass.
+A one-shot run against 6 unseen questions (the held-out split, run once by design) confirms both findings: citation compliance holds at 80–87%, and the conciseness regression reproduces fully, 0 of 9 non-empty answers pass.
 
-**Cost per run:** mean latency 40.8 seconds, about 23,600 tokens, roughly
-$0.007. The full 45-run dev experiment for `v2` cost $0.32.
+**Cost per run:** mean latency 40.8 seconds, about 23,600 tokens, roughly $0.007. The full 45-run dev experiment for `v2` cost $0.32.
 
-One caveat on the LLM judge: this project reports the average over rows
-that actually had something to judge (9.00 out of 10). The dashboard's own
-raw average (5.31) mixes those with rows that had nothing to check, which
-the judge scores at its floor — a different number, answering a different
-question.
+One caveat on the LLM judge: this project reports the average over rows that actually had something to judge (9.00 out of 10). The dashboard's own raw average (5.31) mixes those with rows that had nothing to check, which the judge scores at its floor — a different number, answering a different question.
 
 ## Testing
 
@@ -405,68 +346,39 @@ mypy .
 pytest
 ```
 
-All four are clean right now: **446 tests pass**, with **99% line
-coverage** (3,006 of 3,015 lines). Measure it yourself with:
+All four are clean right now: **446 tests pass**, with **99% line coverage** (3,006 of 3,015 lines). Measure it yourself with:
 
 ```bash
 pytest --cov=. --cov-report=term-missing
 ```
 
-The tests need no OpenAI key and no network access. A scripted chat client
-stands in for the model, and `DDGS`, `httpx.stream`, and
-`trafilatura.extract` are all mocked. This is also why the tests are free
+The tests need no OpenAI key and no network access. A scripted chat client stands in for the model, and `DDGS`, `httpx.stream`, and `trafilatura.extract` are all mocked. This is also why the tests are free
 to run as often as you like.
 
-The only real gap is `main.py` itself — 3 lines, at 0% coverage, because
-every test calls `research_agent.cli.main()` directly and skips the
-`if __name__ == "__main__":` guard around it.
+The only real gap is `main.py` itself — 3 lines, at 0% coverage, because every test calls `research_agent.cli.main()` directly and skips the `if __name__ == "__main__":` guard around it.
 
 ## Limitations and scope
 
-- `read_url` only accepts `http` and `https`, and stops downloading past
-  2 MB. It does **not** block private or local network addresses. Run
-  this agent locally, for learning. Do not expose it as a public service.
-- Only the first 5,000 characters of a page reach the model. Longer pages
-  get cut off.
-- Answer quality depends on what the search tool returns. A weak search
-  result leads to a weak report.
-- Web page content is data, never instructions. The agent does not follow
-  commands it finds on a page.
-- Every API call costs money, both for the OpenAI model and, when
-  tracing is on, for LangSmith.
+- `read_url` only accepts `http` and `https`, and stops downloading past 2 MB. It does **not** block private or local network addresses. Run this agent locally, for learning. Do not expose it as a public service.
+- Only the first 5,000 characters of a page reach the model. Longer pages  get cut off.
+- Answer quality depends on what the search tool returns. A weak search result leads to a weak report.
+- Web page content is data, never instructions. The agent does not follow commands it finds on a page.
+- Every API call costs money, both for the OpenAI model and, when tracing is on, for LangSmith.
 - Session memory lives only in RAM. It disappears when the process ends.
-- Two measured model behaviors are worth stating honestly. First, the
-  final chat answer often restates the whole report instead of pointing
-  at the saved file. Second, the model sometimes names a file it never
-  saved. In both cases, the completion gate still saves the real report,
-  under its own, correct name.
+- Two measured model behaviors are worth stating honestly. First, the final chat answer often restates the whole report instead of pointing at the saved file. Second, the model sometimes names a file it never
+  saved. In both cases, the completion gate still saves the real report, under its own, correct name.
 
 ## Design notes
 
-**An agent in a thin workflow wrapper.** Is this project an agent, or a
-workflow — a fixed sequence of steps written in advance? The honest answer
-is both, in one system. The research loop is agentic: the model decides
-what to search for, which pages to read, and when it has enough. The
-completion gate, the fallback report, and the citation checks around it
-are fixed code paths. They run the same way every time, no matter what
-the model decides.
+**An agent in a thin workflow wrapper.** Is this project an agent, or a workflow — a fixed sequence of steps written in advance? The honest answer is both, in one system. The research loop is agentic: the model decides what to search for, which pages to read, and when it has enough. The completion gate, the fallback report, and the citation checks around it are fixed code paths. They run the same way every time, no matter what the model decides.
 
-**Why no framework?** A framework like LangChain wraps the model call in
-its own abstraction. That is normally useful, but it also hides the real
-prompts and responses moving between the code and the model. This project
-exists to make that flow visible, so the loop is written directly on the
-`openai` SDK instead.
+**Why no framework?** A framework like LangChain wraps the model call in its own abstraction. That is normally useful, but it also hides the real prompts and responses moving between the code and the model. This project exists to make that flow visible, so the loop is written directly on the `openai` SDK instead.
 
-**Tools as an ACI, with poka-yoke.** An ACI, or Agent-Computer Interface,
-is the connection between the agent and its tools. It deserves the same
-care a UI gets for a human user. Poka-yoke means designing an interface so
-a mistake is impossible, not just discouraged. Three examples:
+**Tools as an ACI, with poka-yoke.** An ACI, or Agent-Computer Interface, is the connection between the agent and its tools. It deserves the same care a UI gets for a human user. Poka-yoke means designing an interface so a mistake is impossible, not just discouraged. Three examples:
 
-- Every saved file is forced into the `.md` extension, and locked inside
-  `output/`.
+- Every saved file is forced into the `.md` extension, and locked inside   `output/`.
 - The last iteration forces a `write_report` call, if nothing is saved yet.
-- The fallback call gets no tools at all. It cannot go searching instead
-  of writing.
+- The fallback call gets no tools at all. It cannot go searching instead of writing.
 
 ## License
 
