@@ -372,12 +372,29 @@ def final_answer_is_concise(
 
     Measured once already: the final model call restated a finished report and
     cost more than a third of the whole run's tokens and latency.
+
+    Notes
+    -----
+    A run whose loop ended on `iteration_limit` or `tool_failures` never gave
+    the model a turn to write a final message at all, so its answer is empty
+    through no choice of its own. Scoring that 0 conflates "restated the whole
+    report" with "never got to speak" -- and the two point at opposite fixes.
+    Measured on the first clean dev pair: every empty answer in both runs
+    (10 of 45 on v1, 18 of 45 on v2) had `stop_reason != "goal_satisfied"`,
+    without exception, which is why this is a skip rather than a failure.
     """
     path = outputs.get("saved_report_path")
     if not isinstance(path, str) or not path:
         return _result("final_answer_is_concise", None, "not applicable: no report")
 
     answer = _text(outputs, "final_answer")
+    if not answer.strip():
+        return _result(
+            "final_answer_is_concise",
+            None,
+            "not applicable: the loop ended before the model wrote an answer",
+        )
+
     names_the_file = Path(path).name in answer
     short_enough = len(answer) <= CONCISE_ANSWER_LIMIT
 
