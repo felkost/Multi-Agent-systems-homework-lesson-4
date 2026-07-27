@@ -13,13 +13,19 @@ import httpx
 import pytest
 from openai import BadRequestError
 
-import tools
-from agent import ReportSection, ResearchAgent, ResearchReport, SourceRef, render_report
-from config import (
+from agent import ResearchAgent
+from research_agent.prompts.requests import (
     FALLBACK_REPORT_REQUEST,
     FALLBACK_STRUCTURED_REPORT_REQUEST,
-    Settings,
 )
+from research_agent.report import (
+    ReportSection,
+    ResearchReport,
+    SourceRef,
+    render_report,
+)
+from research_agent.settings import Settings
+from research_agent.tools import fetch, report_writer, search
 
 from fakes import ScriptedChatClient, ScriptedTurn
 
@@ -35,7 +41,7 @@ def _patch_search(monkeypatch: pytest.MonkeyPatch) -> None:
     search_client.text.return_value = [
         {"title": "Result", "href": "https://example.com/one", "body": "A snippet"}
     ]
-    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
+    monkeypatch.setattr(search, "DDGS", Mock(return_value=search_client))
 
 
 def _saved_reports(settings: Settings) -> list[Path]:
@@ -107,8 +113,8 @@ def _patch_read_url(monkeypatch: pytest.MonkeyPatch, *, text: str = "Hello") -> 
     stream_context = MagicMock()
     stream_context.__enter__.return_value = response
     stream_context.__exit__.return_value = False
-    monkeypatch.setattr(tools.httpx, "stream", Mock(return_value=stream_context))
-    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value=text))
+    monkeypatch.setattr(fetch.httpx, "stream", Mock(return_value=stream_context))
+    monkeypatch.setattr(fetch.trafilatura, "extract", Mock(return_value=text))
 
 
 def test_fallback_asks_model_when_no_markdown(
@@ -513,7 +519,9 @@ def test_fallback_reports_none_when_final_write_fails(
         ]
     )
     agent = ResearchAgent(configured_settings, client=client)
-    monkeypatch.setattr(tools.Path, "mkdir", Mock(side_effect=OSError("disk full")))
+    monkeypatch.setattr(
+        report_writer.Path, "mkdir", Mock(side_effect=OSError("disk full"))
+    )
 
     result = agent.run("What is RAG?")
 

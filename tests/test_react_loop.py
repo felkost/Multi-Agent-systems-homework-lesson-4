@@ -11,9 +11,10 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-import tools
 from agent import ResearchAgent, RunState, ToolStep, react_step
-from config import BUDGET_NUDGE_MESSAGE, Settings
+from research_agent.prompts.requests import BUDGET_NUDGE_MESSAGE
+from research_agent.settings import Settings
+from research_agent.tools import fetch, search
 
 from fakes import ScriptedChatClient, ScriptedTurn
 
@@ -31,7 +32,7 @@ def _patch_search(
             "body": snippet,
         }
     ]
-    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
+    monkeypatch.setattr(search, "DDGS", Mock(return_value=search_client))
     return search_client
 
 
@@ -51,8 +52,8 @@ def _patch_read_url(monkeypatch: pytest.MonkeyPatch, *, text: str = "Hello") -> 
     stream_context = MagicMock()
     stream_context.__enter__.return_value = response
     stream_context.__exit__.return_value = False
-    monkeypatch.setattr(tools.httpx, "stream", Mock(return_value=stream_context))
-    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value=text))
+    monkeypatch.setattr(fetch.httpx, "stream", Mock(return_value=stream_context))
+    monkeypatch.setattr(fetch.trafilatura, "extract", Mock(return_value=text))
 
 
 def test_single_tool_exchange_extends_history(
@@ -657,7 +658,7 @@ def test_failed_web_search_is_not_cached(
 ) -> None:
     search_client = Mock()
     search_client.text.side_effect = RuntimeError("backend down")
-    monkeypatch.setattr(tools, "DDGS", Mock(return_value=search_client))
+    monkeypatch.setattr(search, "DDGS", Mock(return_value=search_client))
     agent, _ = _agent(
         configured_settings,
         [

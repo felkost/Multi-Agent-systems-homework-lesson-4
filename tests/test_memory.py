@@ -9,9 +9,9 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-import tools
 from agent import ResearchAgent
-from config import Settings
+from research_agent.settings import Settings
+from research_agent.tools import fetch
 
 from fakes import ScriptedChatClient, ScriptedTurn
 
@@ -27,8 +27,8 @@ def _patch_read_url(monkeypatch: pytest.MonkeyPatch) -> None:
     stream_context = MagicMock()
     stream_context.__enter__.return_value = response
     stream_context.__exit__.return_value = False
-    monkeypatch.setattr(tools.httpx, "stream", Mock(return_value=stream_context))
-    monkeypatch.setattr(tools.trafilatura, "extract", Mock(return_value="Hello"))
+    monkeypatch.setattr(fetch.httpx, "stream", Mock(return_value=stream_context))
+    monkeypatch.setattr(fetch.trafilatura, "extract", Mock(return_value="Hello"))
 
 
 def _research_turns(url: str, filename: str) -> list[ScriptedTurn]:

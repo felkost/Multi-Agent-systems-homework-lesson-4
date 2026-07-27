@@ -10,14 +10,14 @@ from datetime import date
 import pytest
 
 from agent import ResearchAgent
-from config import (
-    SYSTEM_PROMPT_V2_MIN,
+from research_agent.prompts import (
     SYSTEM_PROMPTS,
-    Settings,
     build_system_prompt,
     get_system_prompt,
 )
-from tools import TOOL_REGISTRY
+from research_agent.prompts.v2 import SYSTEM_PROMPT_V2_MIN
+from research_agent.settings import Settings
+from research_agent.tools import TOOL_REGISTRY
 
 from fakes import ScriptedChatClient, ScriptedTurn
 

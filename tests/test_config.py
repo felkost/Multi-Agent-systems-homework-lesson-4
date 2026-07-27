@@ -3,7 +3,7 @@ from contextvars import copy_context
 import pytest
 from pydantic import ValidationError
 
-from config import Settings, load_settings, output_directory
+from research_agent.settings import Settings, load_settings, output_directory
 
 
 def test_settings_reads_environment_aliases(
