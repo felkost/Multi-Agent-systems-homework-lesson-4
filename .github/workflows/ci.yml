@@ -49,7 +49,7 @@ jobs:
         run: mypy .
 
       - name: pytest
-        run: pytest
+        run: pytest --cov=research_agent --cov=agent --cov-report=term-missing --cov-fail-under=80
 
       - name: pip check
         run: python -m pip check
