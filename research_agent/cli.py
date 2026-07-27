@@ -9,7 +9,7 @@ session's memory.
 import io
 import json
 import sys
-from typing import Any, cast
+from typing import Any, Callable, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from openai import APIError, OpenAIError
@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from agent import ResearchAgent
 from research_agent.settings import Settings, load_settings
-from research_agent.state import SessionState, ToolStep
+from research_agent.state import AgentResult, SessionState, ToolStep
 from research_agent.tracing import configure_tracing
 
 _MAX_ARGUMENT_LENGTH = 80
@@ -158,20 +158,83 @@ def format_tracing_notice(settings: Settings, active: bool) -> str | None:
     return None
 
 
-def main() -> None:
-    """Run the interactive research REPL.
+def _handle_repl_command(user_input: str, agent: ResearchAgent) -> str | None:
+    """Handle a local REPL command that never reaches the agent.
 
-    Reads questions from the terminal until the user types ``exit`` or sends
-    EOF, printing each tool call and its result as the agent makes them. One
-    `ResearchAgent` serves the whole session, so its message list is the
-    session's memory.
+    Returns
+    -------
+    str or None
+        ``"stop"`` when the REPL should end, ``"handled"`` when the input
+        was a recognised command already acted on, or ``None`` when
+        `user_input` is a real question for the agent.
+    """
+    if user_input.lower() in ("exit", "quit"):
+        print("Goodbye!")
+        return "stop"
+    if user_input.lower() == ":stats":
+        print(format_session_stats(agent.session))
+        return "handled"
+    return None
+
+
+def _run_turn(
+    agent: ResearchAgent,
+    user_input: str,
+    on_step: Callable[[ToolStep], None],
+) -> AgentResult | None:
+    """Run one question through the agent, surviving a failed request.
+
+    Returns
+    -------
+    AgentResult or None
+        The turn's result, or ``None`` when the request failed and the
+        session should continue -- a `KeyboardInterrupt` is deliberately
+        not caught here, since that means "stop the session", not "retry".
+
+    Notes
+    -----
+    A failed request kills the turn, not the session: the user may want to
+    retry the same question or ask a different one. `APIError` comes first
+    because it is the more specific of the two.
+    """
+    try:
+        return agent.run(user_input, on_step=on_step)
+    except APIError:
+        print(
+            "\nAgent error: OpenAI API request failed. "
+            "Check the API key and connection."
+        )
+        return None
+    except OpenAIError:
+        print("\nAgent error: the OpenAI client could not complete the request.")
+        return None
+
+
+def _print_turn_result(result: AgentResult) -> None:
+    """Print the agent's final answer and any unread-source warning."""
+    if result.final_answer is not None:
+        print(f"\nAgent: {result.final_answer}")
+
+    # The agent cannot rewrite a report the model wrote itself (hl-4
+    # wants free-form Markdown there), so the honest move is to say so
+    # rather than let an unread source pass as evidence.
+    if result.cites_unread_sources:
+        print(
+            "\nWarning: the report lists a source that could not be "
+            "opened -- treat those claims as unverified."
+        )
+
+
+def _start_session() -> tuple[ResearchAgent, str, str] | None:
+    """Print the banner, load settings, and build the session's agent.
+
+    Returns
+    -------
+    tuple of (ResearchAgent, str, str) or None
+        The agent and its console icons, or ``None`` when configuration
+        failed and the caller should exit before the loop starts.
     """
     tool_icon, result_icon = _configure_console()
-
-    def log_step(step: ToolStep) -> None:
-        print(f"\n{format_tool_call(step, tool_icon)}")
-        print(format_tool_result(step, result_icon))
-
     print("Research Agent (type 'exit' to quit, ':stats' for session stats)")
     print("-" * 40)
 
@@ -179,7 +242,7 @@ def main() -> None:
         settings = load_settings()
     except ValidationError:
         print("Configuration error: check OPENAI_API_KEY and values in .env.")
-        return
+        return None
 
     # The agent configures tracing again when it builds its own client; the
     # call is idempotent, and doing it here is what lets the REPL report the
@@ -194,7 +257,27 @@ def main() -> None:
         # Only get_system_prompt raises this here, and its message already
         # lists the versions that do exist.
         print(f"Configuration error: {error}")
+        return None
+
+    return agent, tool_icon, result_icon
+
+
+def main() -> None:
+    """Run the interactive research REPL.
+
+    Reads questions from the terminal until the user types ``exit`` or sends
+    EOF, printing each tool call and its result as the agent makes them. One
+    `ResearchAgent` serves the whole session, so its message list is the
+    session's memory.
+    """
+    started = _start_session()
+    if started is None:
         return
+    agent, tool_icon, result_icon = started
+
+    def log_step(step: ToolStep) -> None:
+        print(f"\n{format_tool_call(step, tool_icon)}")
+        print(format_tool_result(step, result_icon))
 
     while True:
         try:
@@ -206,40 +289,17 @@ def main() -> None:
         if not user_input:
             continue
 
-        if user_input.lower() in ("exit", "quit"):
-            print("Goodbye!")
+        command_outcome = _handle_repl_command(user_input, agent)
+        if command_outcome == "stop":
             break
-
-        if user_input.lower() == ":stats":
-            print(format_session_stats(agent.session))
+        if command_outcome == "handled":
             continue
 
         try:
-            result = agent.run(user_input, on_step=log_step)
-        # A failed request kills the turn, not the session: the user may want
-        # to retry the same question or ask a different one. APIError comes
-        # first because it is the more specific of the two.
-        except APIError:
-            print(
-                "\nAgent error: OpenAI API request failed. "
-                "Check the API key and connection."
-            )
-            continue
-        except OpenAIError:
-            print("\nAgent error: the OpenAI client could not complete the request.")
-            continue
+            result = _run_turn(agent, user_input, log_step)
         except KeyboardInterrupt:
             print("\nGoodbye!")
             break
-
-        if result.final_answer is not None:
-            print(f"\nAgent: {result.final_answer}")
-
-        # The agent cannot rewrite a report the model wrote itself (hl-4
-        # wants free-form Markdown there), so the honest move is to say so
-        # rather than let an unread source pass as evidence.
-        if result.cites_unread_sources:
-            print(
-                "\nWarning: the report lists a source that could not be "
-                "opened -- treat those claims as unverified."
-            )
+        if result is None:
+            continue
+        _print_turn_result(result)

@@ -32,6 +32,66 @@ def _record_failure(
     )
 
 
+def _parse_tool_call(
+    tool_call: ChatCompletionMessageToolCallUnion, state: RunState
+) -> tuple[str, dict[str, Any], Callable[..., Any]] | ToolStep:
+    """Validate one tool call's shape and resolve it to a callable.
+
+    Returns
+    -------
+    tuple of (str, dict, callable) or ToolStep
+        The tool's name, parsed arguments and the function to call -- or an
+        already-built failure `ToolStep` when validation itself failed.
+    """
+    if tool_call.type != "function":
+        return _record_failure(
+            state, tool_call.type, {}, "Only function tool calls are supported."
+        )
+
+    name = tool_call.function.name
+    try:
+        arguments = json.loads(tool_call.function.arguments)
+    except json.JSONDecodeError:
+        return _record_failure(state, name, {}, "Tool arguments are not valid JSON.")
+    if not isinstance(arguments, dict):
+        return _record_failure(state, name, {}, "Tool arguments must be a JSON object.")
+
+    function = TOOL_REGISTRY.get(name)
+    if function is None:
+        return _record_failure(state, name, arguments, f"Unknown tool '{name}'.")
+    return name, arguments, function
+
+
+def _record_tool_outcome(
+    name: str, arguments: dict[str, Any], content: str, state: RunState
+) -> bool:
+    """Update `state` from one tool's string result.
+
+    Returns
+    -------
+    bool
+        Whether the call counts as a success (its content doesn't start with
+        ``ERROR_PREFIX``).
+
+    Notes
+    -----
+    Only reached after a real call: the search-cache shortcut in
+    `_execute_tool_call` already has a cached result and nothing new to
+    record.
+    """
+    ok = not content.startswith(ERROR_PREFIX)
+    state.consecutive_tool_errors = 0 if ok else state.consecutive_tool_errors + 1
+
+    if name == "web_search" and ok and isinstance(arguments.get("query"), str):
+        state.search_cache[arguments["query"]] = content
+    if name == "read_url" and ok:
+        state.read_urls.append(str(arguments["url"]))
+    if name == "write_report" and content.startswith(REPORT_SAVED_PREFIX):
+        state.saved_report_path = content.removeprefix(REPORT_SAVED_PREFIX).strip()
+        state.saved_report_markdown = state.last_report_markdown
+    return ok
+
+
 def _execute_tool_call(
     tool_call: ChatCompletionMessageToolCallUnion,
     state: RunState,
@@ -63,22 +123,10 @@ def _execute_tool_call(
     """
     state.tool_calls_made += 1
 
-    if tool_call.type != "function":
-        return _record_failure(
-            state, tool_call.type, {}, "Only function tool calls are supported."
-        )
-
-    name = tool_call.function.name
-    try:
-        arguments = json.loads(tool_call.function.arguments)
-    except json.JSONDecodeError:
-        return _record_failure(state, name, {}, "Tool arguments are not valid JSON.")
-    if not isinstance(arguments, dict):
-        return _record_failure(state, name, {}, "Tool arguments must be a JSON object.")
-
-    function = TOOL_REGISTRY.get(name)
-    if function is None:
-        return _record_failure(state, name, arguments, f"Unknown tool '{name}'.")
+    parsed = _parse_tool_call(tool_call, state)
+    if isinstance(parsed, ToolStep):
+        return parsed
+    name, arguments, function = parsed
 
     if name == "web_search":
         query = arguments.get("query")
@@ -110,18 +158,69 @@ def _execute_tool_call(
     content = (
         result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
     )
-    ok = not content.startswith(ERROR_PREFIX)
-    state.consecutive_tool_errors = 0 if ok else state.consecutive_tool_errors + 1
-
-    if name == "web_search" and ok and isinstance(arguments.get("query"), str):
-        state.search_cache[arguments["query"]] = content
-    if name == "read_url" and ok:
-        state.read_urls.append(str(arguments["url"]))
-    if name == "write_report" and content.startswith(REPORT_SAVED_PREFIX):
-        state.saved_report_path = content.removeprefix(REPORT_SAVED_PREFIX).strip()
-        state.saved_report_markdown = state.last_report_markdown
+    ok = _record_tool_outcome(name, arguments, content, state)
 
     return ToolStep(name=name, arguments=arguments, result=content, ok=ok)
+
+
+def _forced_write_request(
+    messages: Messages, state: RunState, force_write_report: bool
+) -> tuple[Messages, str | dict[str, Any]]:
+    """Decide whether this call must force `write_report`, and build the request.
+
+    Returns
+    -------
+    tuple of (Messages, str or dict)
+        Request messages (with the budget nudge appended when forcing) and
+        the `tool_choice` value to send.
+
+    Notes
+    -----
+    Takes effect only when no report has been saved yet and at least one
+    source was read: forcing it after a successful save would loop the
+    model into writing forever, and forcing it with no evidence makes the
+    model invent its sources.
+
+    The nudge is a request-only addition: the returned messages carry it to
+    the API, but the caller's persisted history is built from the original
+    `messages`, so the next question never sees it.
+    """
+    force = (
+        force_write_report
+        and state.saved_report_path is None
+        # A forced write with nothing read produces a complete-looking report
+        # whose sources no tool ever returned -- observed directly in the K.3
+        # max_iterations=1 experiment, not hypothesised.
+        and state.successful_reads > 0
+    )
+    request_messages = [*messages, BUDGET_NUDGE_MESSAGE] if force else messages
+    tool_choice: str | dict[str, Any] = (
+        {"type": "function", "function": {"name": "write_report"}} if force else "auto"
+    )
+    return request_messages, tool_choice
+
+
+def _run_tool_calls(
+    tool_calls: list[ChatCompletionMessageToolCallUnion],
+    state: RunState,
+    updated: Messages,
+    on_step: Callable[[ToolStep], None] | None,
+) -> list[ToolStep]:
+    """Execute every tool call from one model turn, appending results to `updated`."""
+    steps: list[ToolStep] = []
+    for tool_call in tool_calls:
+        step = _execute_tool_call(tool_call, state)
+        steps.append(step)
+        if on_step is not None:
+            on_step(step)
+        updated.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": step.result,
+            }
+        )
+    return steps
 
 
 def react_step(
@@ -168,21 +267,8 @@ def react_step(
     request in which a ``tool_call_id`` has no assistant message announcing
     it, so this ordering is part of the protocol, not bookkeeping.
     """
-    force = (
-        force_write_report
-        and state.saved_report_path is None
-        # A forced write with nothing read produces a complete-looking report
-        # whose sources no tool ever returned -- observed directly in the K.3
-        # max_iterations=1 experiment, not hypothesised.
-        and state.successful_reads > 0
-    )
-    # The nudge is a request-only addition: request_messages carries it to
-    # the API, but `updated` (the persisted history) is built from the
-    # original `messages` a few lines down, so the next question never sees
-    # it.
-    request_messages = [*messages, BUDGET_NUDGE_MESSAGE] if force else messages
-    tool_choice: str | dict[str, Any] = (
-        {"type": "function", "function": {"name": "write_report"}} if force else "auto"
+    request_messages, tool_choice = _forced_write_request(
+        messages, state, force_write_report
     )
 
     response = client.chat.completions.create(
@@ -208,19 +294,7 @@ def react_step(
     if not message.tool_calls:
         return StepResult(updated, [], message.content, "goal_satisfied")
 
-    steps: list[ToolStep] = []
-    for tool_call in message.tool_calls:
-        step = _execute_tool_call(tool_call, state)
-        steps.append(step)
-        if on_step is not None:
-            on_step(step)
-        updated.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": step.result,
-            }
-        )
+    steps = _run_tool_calls(message.tool_calls, state, updated, on_step)
     if state.consecutive_tool_errors >= settings.max_consecutive_tool_errors:
         # [12-factor #9]: an unreachable backend would otherwise burn the
         # whole iteration budget on calls that were never going to succeed.

@@ -97,6 +97,32 @@ class ResearchReport(BaseModel):
 _OWN_HEADINGS = ("summary", "limitations", "sources")
 
 
+def _number_sources(
+    sections: list[ReportSection], titles: dict[str, str]
+) -> tuple[list[str], dict[str, int]]:
+    """Assign citation numbers to sources by first appearance in the text.
+
+    Returns
+    -------
+    tuple of (list of str, dict of str to int)
+        Cited URLs in first-appearance order, and each URL's assigned
+        number.
+
+    Notes
+    -----
+    A URL a section cites but that `titles` doesn't know about is skipped:
+    it would get an anchor with no title and no evidence a tool ever
+    returned it.
+    """
+    cited: list[str] = []
+    for section in sections:
+        for url in section.source_urls:
+            if url in titles and url not in cited:
+                cited.append(url)
+    numbers = {url: index for index, url in enumerate(cited, start=1)}
+    return cited, numbers
+
+
 def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> str:
     """Render a structured report into the Markdown ``write_report`` expects.
 
@@ -172,14 +198,7 @@ def render_report(report: ResearchReport, read_urls: set[str] | None = None) -> 
     if read_urls is not None:
         sources = [source for source in sources if source.url in read_urls]
     titles = {source.url: source.title for source in sources}
-    cited: list[str] = []
-    for section in report.sections:
-        for url in section.source_urls:
-            # An unlisted URL is dropped rather than numbered: it would get
-            # an anchor with no title and no evidence a tool ever returned it.
-            if url in titles and url not in cited:
-                cited.append(url)
-    numbers = {url: index for index, url in enumerate(cited, start=1)}
+    cited, numbers = _number_sources(report.sections, titles)
 
     def rendered(section: ReportSection) -> str:
         references = " ".join(

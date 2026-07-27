@@ -110,6 +110,31 @@ class ResearchAgent:
         ``None`` whenever tracing is off, which is what keeps this block free
         for untraced runs.
         """
+        self._attach_run_metadata()
+
+        state = RunState()
+        pending = self._prepare_turn(user_input)
+        step, steps, iteration = self._run_react_loop(pending, state, on_step)
+
+        # Assigned once, after the turn survived. An exception mid-turn would
+        # otherwise leave a tool_call_id without its tool result, and every
+        # later request would fail with HTTP 400.
+        self._messages = step.messages
+        result = self._finish(step, steps, state, iteration, user_input)
+        # The completion gate can still save a report after the loop ended, so
+        # the turn's own record is only complete once _finish has run.
+        state.saved_report_path = result.saved_report_path
+        self._session.runs.append(state)
+        return result
+
+    def _attach_run_metadata(self) -> None:
+        """Attach this run's model, budget and prompt version to its trace.
+
+        Notes
+        -----
+        `get_current_run_tree` returns ``None`` whenever tracing is off,
+        which is what keeps this a no-op for untraced runs.
+        """
         run_tree = get_current_run_tree()
         if run_tree is not None:
             run_tree.add_metadata(
@@ -120,14 +145,22 @@ class ResearchAgent:
                 }
             )
 
-        state = RunState()
-        steps: list[ToolStep] = []
-        # Compacted here and not inside the loop: within one question the pages
-        # just read are the evidence the model is reasoning over, and only a
-        # finished turn's payloads have earned their summary (plan H.6).
-        history = compact_history(self._messages, self._settings.compact_keep_recent)
-        pending: Messages = [*history, {"role": "user", "content": user_input}]
+    def _run_react_loop(
+        self,
+        pending: Messages,
+        state: RunState,
+        on_step: Callable[[ToolStep], None] | None,
+    ) -> tuple[StepResult, list[ToolStep], int]:
+        """Call `react_step` repeatedly until it reports a stop reason.
+
+        Returns
+        -------
+        tuple of (StepResult, list of ToolStep, int)
+            The final step, every step executed across all iterations, and
+            how many iterations were used.
+        """
         max_iterations = self._settings.max_iterations
+        steps: list[ToolStep] = []
 
         step = react_step(
             pending,
@@ -152,16 +185,20 @@ class ResearchAgent:
             )
             steps.extend(step.steps)
 
-        # Assigned once, after the turn survived. An exception mid-turn would
-        # otherwise leave a tool_call_id without its tool result, and every
-        # later request would fail with HTTP 400.
-        self._messages = step.messages
-        result = self._finish(step, steps, state, iteration, user_input)
-        # The completion gate can still save a report after the loop ended, so
-        # the turn's own record is only complete once _finish has run.
-        state.saved_report_path = result.saved_report_path
-        self._session.runs.append(state)
-        return result
+        return step, steps, iteration
+
+    def _prepare_turn(self, user_input: str) -> Messages:
+        """Compact stale history and append the new question.
+
+        Notes
+        -----
+        Compacted here and not inside the loop: within one question the
+        pages just read are the evidence the model is reasoning over, and
+        only a finished turn's payloads have earned their summary (plan
+        H.6).
+        """
+        history = compact_history(self._messages, self._settings.compact_keep_recent)
+        return [*history, {"role": "user", "content": user_input}]
 
     def _finish(
         self,
